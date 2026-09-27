@@ -16,6 +16,8 @@ from clip_engine.services.live_capture import (
     ('https://www.youtube.com/@Some.Channel', ('youtube', 'https://www.youtube.com/@Some.Channel/live')),
     ('https://youtube.com/@handle/live', ('youtube', 'https://www.youtube.com/@handle/live')),
     ('https://www.youtube.com/channel/UCaaaaaaaaaaaaaaaaaaaaaa', ('youtube', 'https://www.youtube.com/channel/UCaaaaaaaaaaaaaaaaaaaaaa/live')),
+    ('https://kick.com/Some_Streamer', ('kick', 'https://kick.com/some_streamer')),
+    ('https://www.kick.com/some-streamer/', ('kick', 'https://kick.com/some-streamer')),
 ])
 def test_channel_urls_are_canonical(url, expected):
     channel = module.live_channel(url)
@@ -27,6 +29,8 @@ def test_channel_urls_are_canonical(url, expected):
     'https://twitch.tv.evil.test/streamer', 'https://user:pw@twitch.tv/streamer', 'https://twitch.tv:8443/streamer',
     'https://www.youtube.com/watch?v=abc', 'https://www.youtube.com/@x', 'https://www.youtube.com/channel/UCshort',
     'https://example.com/@handle', 'not a url', 'https://www.twitch.tv/' + 'a' * 26,
+    'https://kick.com/categories', 'https://kick.com/x/videos/123', 'https://kick.com/a', 'http://kick.com/streamer',
+    'https://kick.com.evil.test/streamer',
 ])
 def test_other_urls_are_refused(url):
     with pytest.raises(LiveCaptureError) as error:

@@ -14,11 +14,12 @@ test('channel links are canonical and match the engine rules', () => {
   const { canonicalLiveChannel } = shared()
   assert.deepEqual(canonicalLiveChannel('https://twitch.tv/Streamer_1/'), { platform: 'twitch', url: 'https://www.twitch.tv/streamer_1' })
   assert.deepEqual(canonicalLiveChannel('https://www.youtube.com/@Some.Channel/live'), { platform: 'youtube', url: 'https://www.youtube.com/@Some.Channel' })
+  assert.deepEqual(canonicalLiveChannel('https://www.kick.com/Some-Streamer/'), { platform: 'kick', url: 'https://kick.com/some-streamer' })
   assert.deepEqual(canonicalLiveChannel('https://m.youtube.com/channel/UCaaaaaaaaaaaaaaaaaaaaaa'),
     { platform: 'youtube', url: 'https://www.youtube.com/channel/UCaaaaaaaaaaaaaaaaaaaaaa' })
   for (const url of ['http://twitch.tv/a', 'https://twitch.tv/videos', 'https://twitch.tv/a/b', 'https://twitch.tv.evil.test/a',
     'https://u:p@twitch.tv/a', 'https://twitch.tv:8443/a', 'https://www.youtube.com/watch?v=x', 'https://www.youtube.com/@x',
-    'https://example.com/@handle', 'nope', 42]) {
+    'https://example.com/@handle', 'https://kick.com/categories', 'https://kick.com/a/videos/1', 'https://kick.com.evil.test/a1', 'nope', 42]) {
     assert.equal(canonicalLiveChannel(url), null, String(url))
   }
 })

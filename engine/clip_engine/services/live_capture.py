@@ -39,6 +39,11 @@ TWITCH_LOGIN = re.compile(r"[A-Za-z0-9_]{1,25}")
 YOUTUBE_HANDLE = re.compile(r"@[A-Za-z0-9._-]{3,30}")
 YOUTUBE_CHANNEL_ID = re.compile(r"UC[A-Za-z0-9_-]{22}")
 TWITCH_HOSTS = {"twitch.tv", "www.twitch.tv", "m.twitch.tv"}
+KICK_HOSTS = {"kick.com", "www.kick.com"}
+KICK_SLUG = re.compile(r"[A-Za-z0-9_-]{2,40}")
+KICK_RESERVED = {"video", "videos", "categories", "category", "search", "auth", "following", "browse", "clips",
+                 "settings", "dashboard", "terms-of-service", "privacy-policy", "community-guidelines"}
+LIVE_EXTRACTORS = {"twitch": ["twitch:stream"], "youtube": ["youtube", "youtube:tab"], "kick": ["kick:live"]}
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com"}
 NOT_LIVE_MARKERS = ("not currently live", "is offline", "not live", "will begin", "premieres in",
                     "this live event will begin", "does not exist")
@@ -113,7 +118,7 @@ class Chunk:
 
 
 def live_channel(url: str) -> LiveChannel:
-    """Accept only a Twitch channel or a YouTube channel page, in canonical form."""
+    """Accept only a Twitch, Kick or YouTube channel page, in canonical form."""
     if not isinstance(url, str) or len(url) > 512:
         raise LiveCaptureError("Unsupported live channel", "unsupported_channel")
     parts = urlsplit(url.strip())
@@ -129,6 +134,10 @@ def live_channel(url: str) -> LiveChannel:
         login = path[1:]
         if TWITCH_LOGIN.fullmatch(login) and login.lower() not in {"videos", "directory", "settings", "p"}:
             return LiveChannel("twitch", f"https://www.twitch.tv/{login.lower()}")
+    elif host in KICK_HOSTS:
+        slug = path[1:]
+        if KICK_SLUG.fullmatch(slug) and slug.lower() not in KICK_RESERVED:
+            return LiveChannel("kick", f"https://kick.com/{slug.lower()}")
     elif host in YOUTUBE_HOSTS:
         segments = path[1:].split("/")
         if segments and segments[-1] == "live":
@@ -187,7 +196,7 @@ def extract_live_info(channel: LiveChannel, deadline: Optional[float] = None) ->
         "proxy": "", "external_downloader": "native", "hls_prefer_native": True,
         "skip_download": True, "noplaylist": True, "socket_timeout": 30,
         "nocheckcertificate": False, "geo_bypass": True, "quiet": True, "no_warnings": True,
-        "allowed_extractors": ["twitch:stream"] if channel.platform == "twitch" else ["youtube", "youtube:tab"],
+        "allowed_extractors": LIVE_EXTRACTORS[channel.platform],
     }
     with guarded_ytdlp_children(deadline), guarded_public_connections():
         with yt_dlp.YoutubeDL(opts) as ydl:

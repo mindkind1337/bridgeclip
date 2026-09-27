@@ -1,6 +1,6 @@
 import { DURATION_IDS } from './job-contract'
 
-export type LivePlatform = 'twitch' | 'youtube'
+export type LivePlatform = 'twitch' | 'youtube' | 'kick'
 
 export interface LiveClipSettings {
   clippingMode: 'quality' | 'economy'
@@ -14,7 +14,7 @@ export interface LiveClipSettings {
 
 export interface LiveChannel {
   id: string
-  /** Canonical channel page: https://www.twitch.tv/<login> or https://www.youtube.com/@handle */
+  /** Canonical channel page: https://www.twitch.tv/<login>, https://kick.com/<slug> or https://www.youtube.com/@handle */
   url: string
   platform: LivePlatform
   displayName: string
@@ -90,6 +90,9 @@ export const DEFAULT_LIVE_CHANNEL: Omit<LiveChannelInput, 'url'> = {
 const TWITCH_HOSTS = new Set(['twitch.tv', 'www.twitch.tv', 'm.twitch.tv'])
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com'])
 const TWITCH_RESERVED = new Set(['videos', 'directory', 'settings', 'p'])
+const KICK_HOSTS = new Set(['kick.com', 'www.kick.com'])
+const KICK_RESERVED = new Set(['video', 'videos', 'categories', 'category', 'search', 'auth', 'following', 'browse', 'clips',
+  'settings', 'dashboard', 'terms-of-service', 'privacy-policy', 'community-guidelines'])
 
 /**
  * Canonical channel page, or null. Mirrors live_channel() in the engine, which
@@ -106,6 +109,11 @@ export function canonicalLiveChannel(value: unknown): { platform: LivePlatform; 
     const login = path.slice(1)
     if (/^[A-Za-z0-9_]{1,25}$/.test(login) && !TWITCH_RESERVED.has(login.toLowerCase())) {
       return { platform: 'twitch', url: `https://www.twitch.tv/${login.toLowerCase()}` }
+    }
+  } else if (KICK_HOSTS.has(host)) {
+    const slug = path.slice(1)
+    if (/^[A-Za-z0-9_-]{2,40}$/.test(slug) && !KICK_RESERVED.has(slug.toLowerCase())) {
+      return { platform: 'kick', url: `https://kick.com/${slug.toLowerCase()}` }
     }
   } else if (YOUTUBE_HOSTS.has(host)) {
     let parts = path.slice(1).split('/')
@@ -149,7 +157,7 @@ export function parseLiveChannelInput(value: unknown): LiveChannelInput & { plat
   if (!value || typeof value !== 'object') throw new Error('Invalid channel')
   const input = value as LiveChannelInput
   const channel = canonicalLiveChannel(input.url)
-  if (!channel) throw new Error('Use a Twitch channel (twitch.tv/name) or a YouTube channel (youtube.com/@handle).')
+  if (!channel) throw new Error('Use a Twitch (twitch.tv/name), Kick (kick.com/name) or YouTube (youtube.com/@handle) channel.')
   if (typeof input.enabled !== 'boolean') throw new Error('Invalid monitoring option')
   if (input.automationId !== null && (typeof input.automationId !== 'string' ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.automationId))) throw new Error('Invalid automation')

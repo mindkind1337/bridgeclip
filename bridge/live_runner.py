@@ -34,7 +34,7 @@ MAX_PROBE_CHANNELS = 50
 MAX_PENDING_CHUNKS = 2
 LIVE_ERRORS = {
     "unsupported_channel": ("This channel link is not supported.",
-                            "Use a Twitch channel (twitch.tv/name) or a YouTube channel (youtube.com/@handle)."),
+                            "Use a Twitch (twitch.tv/name), Kick (kick.com/name) or YouTube (youtube.com/@handle) channel."),
     "no_live_format": ("This live stream has no recordable format.",
                        "Subscriber-only, members-only and region-locked streams are not supported."),
     "encrypted_stream": ("This live stream is protected and cannot be recorded.", None),

@@ -37,6 +37,13 @@ const STATUS: Record<LiveSessionState['status'], { label: string; tone: 'success
   offline: { label: 'Offline', tone: 'idle' }
 }
 
+const PLATFORM: Record<LiveChannel['platform'], { tile: string; icon: React.ReactNode }> = {
+  twitch: { tile: 'bg-[#9146ff]/20 text-[#b98cff]', icon: <Twitch className="h-4 w-4" aria-label="Twitch" /> },
+  youtube: { tile: 'bg-[#ff0033]/15 text-[#ff5c7a]', icon: <Youtube className="h-4 w-4" aria-label="YouTube" /> },
+  // No Kick glyph in the icon set: its wordmark initial in the brand green.
+  kick: { tile: 'bg-[#53fc18]/15 text-[#53fc18]', icon: <span aria-label="Kick" className="text-sm font-black leading-none">K</span> }
+}
+
 function inputFor(channel: LiveChannel): LiveChannelInput {
   const { url, displayName, enabled, automationId, clip, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes } = channel
   return { url, displayName, enabled, automationId, clip: { ...clip, durationRanges: [...clip.durationRanges] }, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes }
@@ -82,7 +89,7 @@ export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void 
   }
 
   const add = async (): Promise<void> => {
-    if (!canonicalLiveChannel(url)) { setError('Use a Twitch channel (twitch.tv/name) or a YouTube channel (youtube.com/@handle).'); return }
+    if (!canonicalLiveChannel(url)) { setError('Use a Twitch (twitch.tv/name), Kick (kick.com/name) or YouTube (youtube.com/@handle) channel.'); return }
     if (await run('add', () => getApi().live.addChannel({ ...DEFAULT_LIVE_CHANNEL, url }))) setUrl('')
   }
 
@@ -93,7 +100,7 @@ export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void 
     <Page width="narrow">
       <PageHeader
         title="Live"
-        description="Follow Twitch and YouTube channels. When one goes live, BridgeClip records it in parts, clips each part, and queues the best moments for posting."
+        description="Follow Twitch, Kick and YouTube channels. When one goes live, BridgeClip records it in parts, clips each part, and queues the best moments for posting."
         actions={overview && overview.channels.length > 0 && (
           <Button size="sm" variant="ghost" icon={<RefreshCw className="h-3.5 w-3.5" />} loading={busy === 'check'}
             onClick={() => void run('check', () => getApi().live.checkNow())}>Check now</Button>
@@ -113,7 +120,7 @@ export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void 
             inputSize="sm"
             className="min-w-[260px] flex-1"
             aria-label="Channel link"
-            placeholder="https://www.twitch.tv/name or https://www.youtube.com/@handle"
+            placeholder="twitch.tv/name, kick.com/name or youtube.com/@handle"
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             onKeyDown={(event) => { if (event.key === 'Enter') void add() }}
@@ -182,15 +189,13 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
   const running = isRunning(state)
   const status = state ? STATUS[state.status] : null
   const automation = automations.find((item) => item.id === channel.automationId)
-  const Icon = channel.platform === 'twitch' ? Twitch : Youtube
 
   return (
     <section aria-label={channel.displayName}>
     <Panel padded={false} className="overflow-hidden">
       <div className="flex items-center gap-3 px-3.5 py-3">
-        <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
-          channel.platform === 'twitch' ? 'bg-[#9146ff]/20 text-[#b98cff]' : 'bg-[#ff0033]/15 text-[#ff5c7a]')}>
-          <Icon className="h-4 w-4" aria-label={channel.platform === 'twitch' ? 'Twitch' : 'YouTube'} />
+        <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full', PLATFORM[channel.platform].tile)}>
+          {PLATFORM[channel.platform].icon}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
