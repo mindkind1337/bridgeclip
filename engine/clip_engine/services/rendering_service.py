@@ -468,9 +468,16 @@ class RenderingService:
         """Analyze the render window's shots. None means use the letterbox."""
         if request.layout_style == LayoutStyle.FIT:
             return None
+        # Who speaks when, in window time: two-person shots follow the speaker.
+        speech = [
+            (seg.start_time_ms - window_start_ms, seg.end_time_ms - window_start_ms, getattr(seg, "speaker_label", None))
+            for seg in (request.transcript_segments or [])
+            if seg.end_time_ms > window_start_ms and seg.start_time_ms < window_start_ms + window_ms
+        ]
         try:
             return await self.layout_analyzer.analyze(
                 request.video_path, window_start_ms, window_ms, source_w, source_h, request.layout_style,
+                speech=speech or None,
             )
         except Exception as e:
             logger.warning(f"Layout analysis failed, falling back to letterbox: {e}", exc_info=True)

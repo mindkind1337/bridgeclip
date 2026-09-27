@@ -167,6 +167,8 @@ class FrameInfo:
     t_ms: int
     faces: list[Box]
     hist: Any  # np.ndarray
+    # Per face (same order): mouth-area change since the previous frame, 0-1; -1 when unknown.
+    mouth_motion: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -190,6 +192,9 @@ class ShotLayout:
     screen_focus: Optional[Box] = None
     cam_box: Optional[Box] = None
     cam_face: Optional[Box] = None
+    # two_shot: who to show full frame over time, as (t_ms from shot start, person index
+    # into `people`, or -1 for both). Empty: always both.
+    speaker_path: list[tuple[int, int]] = field(default_factory=list)
 
     def summary(self) -> dict:
         return {
@@ -201,6 +206,7 @@ class ShotLayout:
             "screen_focus": self.screen_focus.to_list() if self.screen_focus else None,
             "cam_box": self.cam_box.to_list() if self.cam_box else None,
             "people": [p.to_list() for p in self.people],
+            "speaker_switches": len(self.speaker_path),
         }
 
 
@@ -699,6 +705,152 @@ def merge_vision_result(heuristic: ShotLayout, result: dict, src_w: int, src_h: 
 # ------------------------------------------------------------------
 
 
+# ------------------------------------------------------------------
+# Active speaker (two-person shots)
+# ------------------------------------------------------------------
+
+MOUTH_PATCH_SIZE = (24, 12)
+# A switch needs this much speech, so short interjections do not cut back and forth.
+MIN_SPEAKER_TURN_MS = 1500
+# One person's mouth must move this much more than the other's to be called the speaker.
+SPEAKER_MOTION_RATIO = 1.35
+# Evidence a speaker label needs before it is tied to a face.
+MIN_LABEL_EVIDENCE_MS = 1500
+
+
+def mouth_patch(gray: Any, row: Any) -> Optional[Any]:
+    """Small grayscale patch around a face's mouth (YuNet mouth corners), or None."""
+    try:
+        rx, ry, lx, ly = (float(v) for v in row[10:14])
+        w, h = float(row[2]), float(row[3])
+    except (TypeError, ValueError, IndexError):
+        return None
+    cx, cy = (rx + lx) / 2, (ry + ly) / 2 + h * 0.04
+    half_w, half_h = max(4.0, w * 0.32), max(3.0, h * 0.16)
+    x0, x1 = int(max(0, cx - half_w)), int(min(gray.shape[1], cx + half_w))
+    y0, y1 = int(max(0, cy - half_h)), int(min(gray.shape[0], cy + half_h))
+    if x1 - x0 < 4 or y1 - y0 < 3:
+        return None
+    patch = cv2.resize(gray[y0:y1, x0:x1], MOUTH_PATCH_SIZE).astype(np.float32)
+    return patch - patch.mean()
+
+
+def mouth_motion(patch: Optional[Any], box: Box, previous: list) -> float:
+    """Mean change of the mouth patch since the same face's previous frame (0-1), or -1."""
+    if patch is None:
+        return -1.0
+    best = None
+    for cx, cy, other in previous:
+        distance = math.hypot(cx - box.cx, cy - box.cy)
+        if other is not None and distance < 0.08 and (best is None or distance < best[0]):
+            best = (distance, other)
+    if best is None:
+        return -1.0
+    return float(min(1.0, np.mean(np.abs(patch - best[1])) / 64.0))
+
+
+def _person_motion(frame: FrameInfo, people: list[Box]) -> list[Optional[float]]:
+    """This frame's mouth motion for each person of a two-shot (nearest face within reach)."""
+    result: list[Optional[float]] = []
+    for person in people:
+        best = None
+        for face, motion in zip(frame.faces, frame.mouth_motion):
+            distance = math.hypot(face.cx - person.cx, face.cy - person.cy)
+            if motion >= 0 and distance < max(0.12, person.w) and (best is None or distance < best[0]):
+                best = (distance, motion)
+        result.append(best[1] if best else None)
+    return result
+
+
+def _mean(values: list[float]) -> Optional[float]:
+    return sum(values) / len(values) if values else None
+
+
+def _louder(a: Optional[float], b: Optional[float]) -> int:
+    """0 or 1 when one mouth clearly moved more than the other, else -1."""
+    if a is None or b is None or max(a, b) < 0.01:
+        return -1
+    if a >= b * SPEAKER_MOTION_RATIO:
+        return 0
+    if b >= a * SPEAKER_MOTION_RATIO:
+        return 1
+    return -1
+
+
+def plan_active_speakers(shots: list[ShotLayout], frames: list[FrameInfo],
+                         speech: list[tuple[int, int, Optional[str]]]) -> None:
+    """Fill `speaker_path` on two-person shots: show whoever is speaking.
+
+    For each stretch of speech, the person whose mouth moves clearly more is the
+    speaker. Transcript speaker labels pool that evidence: once a label is tied
+    to one side of the shot, all its speech goes there. Overlapping speech,
+    unclear evidence and short interjections keep both people on screen.
+    """
+    for shot in shots:
+        if shot.layout != LayoutType.TWO_SHOT or len(shot.people) < 2:
+            continue
+        people = shot.people[:2]
+        shot_frames = [f for f in frames if shot.start_ms <= f.t_ms < shot.end_ms]
+        turns = sorted((max(s, shot.start_ms), min(e, shot.end_ms), label) for s, e, label in speech
+                       if min(e, shot.end_ms) - max(s, shot.start_ms) > 0)
+        if not shot_frames or not turns:
+            continue
+
+        def motion_during(start: int, end: int) -> tuple[Optional[float], Optional[float]]:
+            values: list[list[float]] = [[], []]
+            for frame in shot_frames:
+                if start <= frame.t_ms < end:
+                    for index, motion in enumerate(_person_motion(frame, people)):
+                        if motion is not None:
+                            values[index].append(motion)
+            return _mean(values[0]), _mean(values[1])
+
+        # Tie labels to sides from all their speech in the shot.
+        evidence: dict[str, list[float]] = {}
+        for start, end, label in turns:
+            if label is None:
+                continue
+            a, b = motion_during(start, end)
+            if a is not None and b is not None:
+                totals = evidence.setdefault(label, [0.0, 0.0, 0.0])
+                totals[0] += a * (end - start)
+                totals[1] += b * (end - start)
+                totals[2] += end - start
+        side_of: dict[str, int] = {}
+        for label, (a, b, duration) in evidence.items():
+            side = _louder(a, b) if duration >= MIN_LABEL_EVIDENCE_MS else -1
+            if side >= 0:
+                side_of[label] = side
+        if len(set(side_of.values())) < len(side_of):
+            side_of = {}  # two voices on one face: the labels are not reliable here
+
+        # Who to show for each turn; overlapping turns show both.
+        choices: list[tuple[int, int, int]] = []
+        for index, (start, end, label) in enumerate(turns):
+            overlapped = any(other[0] < end and other[1] > start and other[2] != label
+                             for j, other in enumerate(turns) if j != index)
+            if overlapped:
+                side = -1
+            elif label in side_of:
+                side = side_of[label]
+            else:
+                side = _louder(*motion_during(start, end))
+            choices.append((start, end, side))
+
+        # Short turns keep the previous framing; silences hold it.
+        path: list[tuple[int, int]] = []
+        current = -1
+        for start, end, side in choices:
+            if side == current or end - start < MIN_SPEAKER_TURN_MS:
+                continue
+            current = side
+            path.append((max(0, start - shot.start_ms), side))
+        if any(side >= 0 for _, side in path):
+            if path[0][0] > 0:
+                path.insert(0, (0, -1))
+            shot.speaker_path = path
+
+
 class LayoutAnalyzer:
     """Analyzes a clip's shots and picks a 9:16 framing per shot."""
 
@@ -730,11 +882,14 @@ class LayoutAnalyzer:
         src_h: int,
         style: str = LayoutStyle.AUTO,
         vision: bool = True,
+        speech: Optional[list[tuple[int, int, Optional[str]]]] = None,
     ) -> Optional[ClipLayoutPlan]:
         """Plan the framing for the render window [start_ms, start_ms + duration_ms).
 
         `vision=False` skips the paid vision model: heuristics only, used when
         the plan only informs pacing (Classic style, 16:9 output).
+        `speech` is who speaks when, as (start_ms, end_ms, speaker label) in
+        window time: two-person shots then show whoever is speaking.
         """
         if style == LayoutStyle.FIT:
             return ClipLayoutPlan(
@@ -786,6 +941,8 @@ class LayoutAnalyzer:
             shots.extend(apply_style(sub, style, src_w, src_h) for sub in sub_shots)
 
         shots = self._merge_adjacent(shots)
+        if speech:
+            plan_active_speakers(shots, frames, speech)
         plan = ClipLayoutPlan(
             shots=shots, source_width=src_w, source_height=src_h, vision_cost_usd=vision_cost,
             face_samples=[(f.t_ms, f.faces) for f in frames],
@@ -869,6 +1026,7 @@ class LayoutAnalyzer:
                              math.ceil(frame_limit / MAX_RETAINED_KEYFRAMES))
         keyframe_bytes = 0
 
+        previous_mouths: list = []
         with media_process(cmd, timeout=30 * 60) as (proc, _stderr):
             index = 0
             while True:
@@ -884,17 +1042,25 @@ class LayoutAnalyzer:
 
                 _, faces = detector.detect(image)
                 boxes = []
+                motions = []
+                mouths = []
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
                 candidates = sorted(faces, key=lambda row: float(row[14]), reverse=True)[:MAX_FACES_PER_FRAME] if faces is not None else []
                 for row in candidates:
                     if float(row[14]) < FACE_SCORE_THRESHOLD:
                         continue
                     x, y, w, h = (float(v) for v in row[:4])
-                    boxes.append(Box(x / width, y / height, w / width, h / height).clamp())
+                    box = Box(x / width, y / height, w / width, h / height).clamp()
+                    boxes.append(box)
+                    patch_now = mouth_patch(gray, row)
+                    mouths.append((box.cx, box.cy, patch_now))
+                    motions.append(mouth_motion(patch_now, box, previous_mouths))
+                previous_mouths = mouths
 
                 hsv = cv2.cvtColor(cv2.resize(image, (160, 90)), cv2.COLOR_BGR2HSV)
                 hist = cv2.calcHist([hsv], [0, 1], None, [24, 16], [0, 180, 0, 256])
                 cv2.normalize(hist, hist)
-                frames.append(FrameInfo(t_ms=t_ms, faces=boxes, hist=hist))
+                frames.append(FrameInfo(t_ms=t_ms, faces=boxes, hist=hist, mouth_motion=motions))
 
                 if index % keyframe_every == 0:
                     ok, jpg = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])

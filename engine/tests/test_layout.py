@@ -536,3 +536,61 @@ class TestDetector:
         thread.start()
         thread.join()
         assert other and other[0] is not own
+
+
+def test_two_shot_follows_the_speaker_whose_mouth_moves():
+    from clip_engine.services.layout_analyzer import Box, FrameInfo, LayoutType, ShotLayout, plan_active_speakers
+    left, right = Box(0.15, 0.3, 0.12, 0.2), Box(0.7, 0.3, 0.12, 0.2)
+    frames = []
+    for i in range(80):  # 20 s at 4 fps: left talks 0-8 s, right talks 8-16 s, both 16-20 s
+        t = i * 250
+        talking_left = t < 8000 or t >= 16000
+        talking_right = 8000 <= t
+        frames.append(FrameInfo(t, [left, right], None, [0.30 if talking_left else 0.05, 0.30 if talking_right else 0.05]))
+    shot = ShotLayout(0, 20000, LayoutType.TWO_SHOT, people=[left, right])
+    speech = [(0, 8000, 'S1'), (8000, 16000, 'S2'), (16000, 20000, 'S1'), (16500, 20000, 'S2')]
+    plan_active_speakers([shot], frames, speech)
+    assert shot.speaker_path == [(0, 0), (8000, 1), (16000, -1)]
+
+
+def test_two_shot_keeps_both_when_it_cannot_tell_who_speaks():
+    from clip_engine.services.layout_analyzer import Box, FrameInfo, LayoutType, ShotLayout, plan_active_speakers
+    left, right = Box(0.15, 0.3, 0.12, 0.2), Box(0.7, 0.3, 0.12, 0.2)
+    frames = [FrameInfo(i * 250, [left, right], None, [0.2, 0.19]) for i in range(40)]
+    shot = ShotLayout(0, 10000, LayoutType.TWO_SHOT, people=[left, right])
+    plan_active_speakers([shot], frames, [(0, 10000, 'S1')])
+    assert shot.speaker_path == []
+
+
+def test_speaker_turns_become_overlays_on_the_split():
+    from clip_engine.services.layout_analyzer import Box, LayoutType, ShotLayout
+    from clip_engine.services.layout_renderer import shot_chain, speaker_windows
+    shot = ShotLayout(2000, 22000, LayoutType.TWO_SHOT, people=[Box(0.15, 0.3, 0.12, 0.2), Box(0.7, 0.3, 0.12, 0.2)],
+                      speaker_path=[(0, 0), (8000, 1), (16000, -1)])
+    assert speaker_windows(shot) == [[(2.0, 10.0)], [(10.0, 18.0)]]
+    chain = shot_chain(0, shot, 1920, 1080, 1080, 1920)
+    assert "vstack" in chain and chain.count("overlay=") == 2
+    assert "between(t,2.000,10.000)" in chain and "between(t,10.000,18.000)" in chain
+    assert chain.endswith("[v0]")
+
+
+@pytest.mark.skipif(not TEST_FFMPEG, reason="ffmpeg not installed")
+def test_ffmpeg_renders_a_two_shot_that_follows_the_speaker(tmp_path):
+    plan = ClipLayoutPlan(
+        shots=[ShotLayout(0, 3000, LayoutType.TWO_SHOT, people=[Box(0.15, 0.3, 0.12, 0.2), Box(0.7, 0.3, 0.12, 0.2)],
+                          speaker_path=[(0, 0), (1000, 1), (2000, -1)])],
+        source_width=640, source_height=360,
+    )
+    graph = build_layout_graph(plan, 360, 640)
+    out = tmp_path / "speaker.mp4"
+    subprocess.run([
+        TEST_FFMPEG, "-v", "error", "-y",
+        "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=12:duration=3",
+        "-filter_complex", graph, "-map", "[base]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out),
+    ], check=True)
+    probe = subprocess.run([
+        os.environ.get("TEST_FFPROBE") or shutil.which("ffprobe") or "ffprobe",
+        "-v", "error", "-select_streams", "v:0", "-count_frames",
+        "-show_entries", "stream=width,height,nb_read_frames", "-of", "csv=p=0", str(out),
+    ], check=True, capture_output=True, text=True).stdout.strip()
+    assert tuple(int(value) for value in probe.split(",")) == (360, 640, 90)

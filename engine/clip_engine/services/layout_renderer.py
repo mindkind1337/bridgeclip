@@ -94,6 +94,27 @@ def _fill_crop_path(
     return crop_w, crop_h, xs, ys
 
 
+MAX_SPEAKER_WINDOWS = 60
+
+
+def speaker_windows(shot: ShotLayout) -> list[list[tuple[float, float]]]:
+    """Window-time (start_s, end_s) spans where each of the two people is shown alone."""
+    windows: list[list[tuple[float, float]]] = [[], []]
+    path = shot.speaker_path
+    for n, (t_ms, person) in enumerate(path):
+        end_ms = path[n + 1][0] if n + 1 < len(path) else shot.end_ms - shot.start_ms
+        if person in (0, 1) and end_ms > t_ms:
+            windows[person].append(((shot.start_ms + t_ms) / 1000, (shot.start_ms + end_ms) / 1000))
+    return [spans[:MAX_SPEAKER_WINDOWS] for spans in windows]
+
+
+def static_fill_crop(person: Box, src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int, int, int]:
+    """Full-frame crop (w, h, x, y) on one person, like a talking head held still."""
+    still = ShotLayout(0, 1, LayoutType.TALKING_HEAD, focus_path=[(0, person.cx, person.cy)])
+    crop_w, crop_h, xs, ys = _fill_crop_path(still, src_w, src_h, out_w, out_h)
+    return crop_w, crop_h, int(xs[0][1]), int(ys[0][1])
+
+
 def fill_crop(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int, str, str]:
     """9:16 crop that follows the shot's focus path. Returns (w, h, x_expr, y_expr).
 
@@ -334,14 +355,34 @@ def shot_chain(
     if shot.layout == LayoutType.TWO_SHOT and len(shot.people) >= 2:
         left, right = shot.people[0], shot.people[1]
         mid = (left.cx + right.cx) / 2 * src_w
-        return (
-            f"[t{i}]split=2[pa{i}][pb{i}];"
+        windows = speaker_windows(shot)
+        speakers = [person for person in (0, 1) if windows[person]]
+        stacked_out = f"base{i}" if speakers else f"v{i}"
+        chain = (
+            f"[{'sp' if speakers else 't'}{i}{'s' if speakers else ''}]split=2[pa{i}][pb{i}];"
             f"[pa{i}]{_crop(person_crop(left, src_w, src_h, out_w, top_h, (0, mid)))},"
             f"scale={out_w}:{top_h}:{scale}[top{i}];"
             f"[pb{i}]{_crop(person_crop(right, src_w, src_h, out_w, bottom_h, (mid, src_w)))},"
             f"scale={out_w}:{bottom_h}:{scale}[bot{i}];"
-            f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]"
+            f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[{stacked_out}]"
         )
+        if not speakers:
+            return chain
+        # Whoever is speaking fills the frame, laid over the two-person split
+        # during their turns (`t` is window time, as in the talking-head crop).
+        streams = [f"[sp{i}s]"] + [f"[sp{i}p{person}]" for person in speakers]
+        chain = f"[t{i}]split={len(streams)}{''.join(streams)};" + chain
+        last = f"base{i}"
+        for n, person in enumerate(speakers):
+            w, h, x, y = static_fill_crop(shot.people[person], src_w, src_h, out_w, out_h)
+            enable = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in windows[person])
+            out = f"v{i}" if n == len(speakers) - 1 else f"ov{i}{n}"
+            chain += (
+                f";[sp{i}p{person}]crop={w}:{h}:{x}:{y},scale={out_w}:{out_h}:{scale},setsar=1[full{i}{person}]"
+                f";[{last}][full{i}{person}]overlay=0:0:enable='{enable}'{',setsar=1' if out == f'v{i}' else ''}[{out}]"
+            )
+            last = out
+        return chain
     if shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None:
         cam_rect = cam_crop(shot.cam_box, shot.cam_face, src_w, src_h, out_w, bottom_h)
         fit = panel_fit(cam_rect, out_w, bottom_h)
@@ -567,8 +608,16 @@ FILL_BANNER_Y = 1590
 TOP_TITLE_Y = 110
 
 
+def speaker_share(shot: ShotLayout) -> float:
+    """Share of a two-shot's time with one person full frame."""
+    length = max(1, shot.end_ms - shot.start_ms)
+    return sum(end - start for spans in speaker_windows(shot) for start, end in spans) * 1000 / length
+
+
 def caption_anchor(shot: ShotLayout, src_w: int, src_h: int, out_w: int, out_h: int) -> tuple[int, int]:
     """(ASS alignment, y) for captions during this shot."""
+    if shot.layout == LayoutType.TWO_SHOT and speaker_share(shot) >= 0.5:
+        return 5, int(out_h * FILL_CAPTION_Y / 1920)  # mostly one speaker full frame: as a talking head
     if shot.layout == LayoutType.TWO_SHOT or (shot.layout == LayoutType.SCREEN_CAM and shot.cam_box is not None):
         return 5, stacked_panel_heights(shot, src_h, out_h)[0]  # centered on the seam
     if shot.layout in (LayoutType.SCREEN, LayoutType.SCREEN_CAM):
