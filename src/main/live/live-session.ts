@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { BRIDGE_CONTRACT_VERSION } from '../../shared/job-contract'
-import { LIVE_OVERLAP_SECONDS, MAX_LIVE_ACTIVITY, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LivePartInfo, type LiveSessionState, isLiveTimeline, isReplayUrl } from '../../shared/live'
+import { MAX_LIVE_ACTIVITY, liveOverlapSeconds, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LivePartInfo, type LiveSessionState, isLiveTimeline, isReplayUrl } from '../../shared/live'
 import { addLibraryClipsToAutomation } from '../automations'
 import { getJobOutput } from '../file-manager'
 import { logger } from '../logger'
@@ -59,17 +59,22 @@ const DECISION_TEXT: Record<LiveClipDecision, (minScore: number, linked: boolean
   kept: (_min, linked) => linked ? 'queued for posting' : 'kept (no automation linked)',
   low_score: (min) => `not posted: score below ${Math.round(min * 100)}`,
   duplicate: () => 'not posted: same moment as a clip already kept',
-  hourly_limit: () => 'not posted: hourly posting limit reached'
+  hourly_limit: () => 'not posted: hourly posting limit reached',
+  boundary: () => 'not posted: cut by the end of the part (the next part has this moment whole)'
 }
 
-interface ChunkPlacement { jobId: string; part: number; streamOffsetSeconds: number; leadInSeconds: number; timeline: [number, number, number][] }
+interface ChunkPlacement {
+  jobId: string; part: number; streamOffsetSeconds: number; leadInSeconds: number; timeline: [number, number, number][]
+  durationSeconds: number | null; final: boolean
+}
 
 function placement(message: Record<string, unknown>): ChunkPlacement | null {
   const { job_id: jobId, part, stream_offset_s: offset } = message
   if (typeof jobId !== 'string' || !UUID.test(jobId) || !Number.isInteger(part) || (part as number) < 1 || !finite(offset) || offset < 0) return null
   const leadIn = message.lead_in_s
   return { jobId, part: part as number, streamOffsetSeconds: offset, leadInSeconds: finite(leadIn) && leadIn >= 0 ? leadIn : 0,
-    timeline: isLiveTimeline(message.timeline) ? message.timeline : [] }
+    timeline: isLiveTimeline(message.timeline) ? message.timeline : [],
+    durationSeconds: finite(message.duration_s) && message.duration_s > 0 ? message.duration_s : null, final: message.final === true }
 }
 
 export class LiveSession {
@@ -110,7 +115,7 @@ export class LiveSession {
       parent_pid: process.pid,
       channel_url: this.channel.url,
       chunk_seconds: this.channel.chunkMinutes * 60,
-      overlap_seconds: LIVE_OVERLAP_SECONDS,
+      overlap_seconds: liveOverlapSeconds(this.channel.clip.durationRanges, this.channel.chunkMinutes),
       max_clips_per_chunk: this.channel.maxClipsPerChunk,
       clip: {
         clipping_mode: clip.clippingMode,

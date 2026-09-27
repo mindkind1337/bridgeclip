@@ -289,6 +289,23 @@ def start_chat(channel):
         return None
 
 
+BOUNDARY_MARGIN_SECONDS = 3
+
+
+def part_context(chunk, overlap_seconds: int) -> str:
+    """Tell the planner this is one part of a live: moments cut by the part's end are seen whole in the next part."""
+    lead_in = getattr(chunk, "lead_in_seconds", 0) or 0
+    lines = [f"This video is part {chunk.part} of a live stream being recorded in parts."]
+    if lead_in:
+        lines.append(f"Its first {lead_in:.0f} seconds repeat the end of the previous part, so moments there were "
+                     "already judged; prefer moments that run past them.")
+    if not getattr(chunk, "final", False):
+        lines.append(f"The next part will repeat the last {overlap_seconds} seconds of this one and continue the stream. "
+                     "A moment still going on at the very end of this video is cut here and will be seen whole in the next part: "
+                     f"do not pick a clip that runs into the last {BOUNDARY_MARGIN_SECONDS} seconds.")
+    return " ".join(lines)
+
+
 def chat_for_chunk(chat, chunk) -> tuple:
     """(messages on the chunk's timeline, planner notes, stats); empty without chat or timing."""
     if chat is None or not getattr(chunk, "timeline", ()):
@@ -306,7 +323,7 @@ async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobR
     from clip_engine.services.live_capture import compress_timeline
     placement = {"job_id": job_id, "part": chunk.part, "stream_offset_s": chunk.stream_offset_seconds,
                  "duration_s": chunk.duration_seconds, "lead_in_s": chunk.lead_in_seconds,
-                 "timeline": compress_timeline(getattr(chunk, "timeline", ()))}
+                 "timeline": compress_timeline(getattr(chunk, "timeline", ())), "final": bool(getattr(chunk, "final", False))}
     bridge.emit({"type": "chunk_started", **placement})
     _clipping_part.update(part=chunk.part, step=None)
     chat_messages, chat_notes, chat_stats = chat_for_chunk(chat, chunk)
@@ -331,6 +348,7 @@ async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobR
             banner_channel_url=clip.get("banner_channel_url"),
             keyterms=clip.get("keyterms") or None,
             audience_notes=chat_notes,
+            context_notes=part_context(chunk, spec["overlap_seconds"]),
         )
         started = time.monotonic()
         result = await pipeline.process_video(request)

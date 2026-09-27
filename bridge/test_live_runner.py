@@ -44,6 +44,8 @@ class LiveRunnerTests(unittest.TestCase):
         self.requests = []
         self.fail_parts = set()
         self.capture_done = threading.Event()
+        # Set once the first chunk is being clipped, so later chunks queue up behind it.
+        self.clipping_started = threading.Event()
         self.settings_env = {}
 
     def spec(self, **overrides):
@@ -72,6 +74,8 @@ class LiveRunnerTests(unittest.TestCase):
                     path = os.path.join(tmp, f"part{part}.mp4")
                     open(path, "wb").close()
                     self.on_chunk(FakeChunk(part, path, (part - 1) * 510.0, 600.0, 0 if part == 1 else 90.0))
+                    if part == 1:
+                        test.clipping_started.wait(5)
                 test.capture_done.set()
                 if error:
                     raise FakeCaptureError("x", error)
@@ -84,6 +88,7 @@ class LiveRunnerTests(unittest.TestCase):
             async def process_video(self, request):
                 # Hold the first chunk until capture has queued everything, so
                 # backlog handling sees a deterministic queue.
+                test.clipping_started.set()
                 await asyncio.get_running_loop().run_in_executor(None, test.capture_done.wait)
                 test.requests.append(request)
                 part = len(test.requests)
@@ -164,6 +169,16 @@ class LiveRunnerTests(unittest.TestCase):
         self.assertEqual(live.chat_for_chunk(None, chunk), ([], None, None))
         untimed = FakeChunk(1, "p.mp4", 0.0, 300.0, 0.0)
         self.assertEqual(live.chat_for_chunk(chat, untimed), ([], None, None))
+
+    def test_the_planner_is_told_about_the_part_boundary(self):
+        middle = FakeChunk(2, "p.mp4", 510.0, 600.0, 90.0)
+        text = live.part_context(middle, 90)
+        self.assertIn("part 2", text)
+        self.assertIn("first 90 seconds repeat", text)
+        self.assertIn("do not pick a clip that runs into the last 3 seconds", text)
+        last = FakeChunk(3, "p.mp4", 1020.0, 300.0, 90.0)
+        last.final = True
+        self.assertNotIn("next part", live.part_context(last, 90))
 
     def test_each_new_pipeline_step_is_reported_once(self):
         output = io.StringIO()

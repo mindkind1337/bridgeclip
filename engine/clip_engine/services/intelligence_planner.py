@@ -390,6 +390,7 @@ class IntelligencePlannerService:
         end_time_seconds: Optional[float] = None,
         aspect_ratio: str = "9:16",
         audience_notes: Optional[str] = None,
+        context_notes: Optional[str] = None,
     ) -> ClipPlanResponse:
         """
         Plan viral clips from video content.
@@ -408,6 +409,7 @@ class IntelligencePlannerService:
             end_time_seconds: Optional end of processing range (clips only until this point)
             aspect_ratio: Output aspect ratio; long 16:9 clips are planned as longform edits
             audience_notes: Optional live-chat reaction summary (per time window) for live recordings
+            context_notes: Optional plain instructions about the source (e.g. it is one part of a live recording)
 
         Returns:
             ClipPlanResponse with identified clips
@@ -575,6 +577,7 @@ class IntelligencePlannerService:
             self._current_video_duration or effective_duration_seconds,
             longform,
             audience_notes,
+            context_notes,
         )
         
         model_name = self.settings.planner_model
@@ -923,6 +926,7 @@ Do not overlap clips by more than 5 seconds."""
         video_duration_seconds: float = 0.0,
         longform: bool = False,
         audience_notes: Optional[str] = None,
+        context_notes: Optional[str] = None,
     ) -> list[dict]:
         """Build the planner messages (transcript, plus frames when provided)."""
         user_content = []
@@ -945,6 +949,8 @@ Do not overlap clips by more than 5 seconds."""
             "type": "text",
             "text": f"{source_description}\n\nThe video is approximately {video_duration:.0f} seconds long.{frames_note}",
         })
+        if context_notes:
+            user_content.append({"type": "text", "text": "\n\nABOUT THIS VIDEO. " + context_notes[:1000]})
         if audience_notes:
             user_content.append({"type": "text", "text": AUDIENCE_NOTES_INTRO + audience_notes[:MAX_AUDIENCE_NOTES_CHARS]})
 

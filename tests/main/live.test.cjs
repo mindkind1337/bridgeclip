@@ -597,3 +597,22 @@ test('a channel shows the clips of its current live, or of its latest one', asyn
     assert.equal(current.clips[0].runDir, path.join(library, yesterday))
   } finally { cleanup() }
 })
+
+test('a clip cut by the end of a part is left for the next part, except in the last part', () => {
+  const { selectLiveClips, liveOverlapSeconds } = shared()
+  const clip = (index, start, end, score) => ({ clip_index: index, start_time_ms: start * 1000, end_time_ms: end * 1000, virality_score: score })
+  const now = Date.parse('2026-09-27T20:00:00Z')
+  const options = { minScore: 0.5, maxPostsPerHour: 10, now }
+  // Part 1 (600 s): its best moment runs into the end and is cut there.
+  const partOne = selectLiveClips([clip(0, 560, 600, 0.9), clip(1, 100, 140, 0.7)], { streamOffsetSeconds: 0, durationSeconds: 600 }, [], options)
+  assert.deepEqual(partOne.decisions.map((item) => [item.clip.clip_index, item.decision]), [[0, 'boundary'], [1, 'kept']])
+  // Part 2 starts 90 s before part 1's end: the same moment, whole, is kept (not a duplicate of the cut one).
+  const partTwo = selectLiveClips([clip(0, 50, 130, 0.9)], { streamOffsetSeconds: 510, durationSeconds: 600 }, partOne.kept, options)
+  assert.deepEqual(partTwo.indices, [0])
+  // In the last part nothing follows: a clip up to the end is kept.
+  assert.deepEqual(selectLiveClips([clip(0, 560, 600, 0.9)], { streamOffsetSeconds: 0, durationSeconds: 600, final: true }, [], options).indices, [0])
+  assert.equal(liveOverlapSeconds(['short'], 10), 90)
+  assert.equal(liveOverlapSeconds(['medium'], 10), 150)
+  assert.equal(liveOverlapSeconds(['short', 'long'], 10), 299)
+  assert.equal(liveOverlapSeconds(['long'], 5), 149)
+})

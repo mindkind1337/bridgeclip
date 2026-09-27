@@ -266,6 +266,19 @@ export const LIVE_LIMITS = {
 } as const
 
 export const LIVE_OVERLAP_SECONDS = 90
+/** Clips ending this close to a (non-final) part's end are cut by it: the next part has them whole. */
+export const LIVE_BOUNDARY_MARGIN_SECONDS = 3
+
+const DURATION_MAX_SECONDS: Record<string, number> = { xshort: 30, short: 60, medium: 120, long: 300 }
+
+/**
+ * Seconds each part repeats from the previous one: enough to see the longest
+ * allowed clip whole plus some setup, and under half a part (the engine's limit).
+ */
+export function liveOverlapSeconds(durationRanges: readonly string[], chunkMinutes: number): number {
+  const longest = Math.max(0, ...durationRanges.map((id) => DURATION_MAX_SECONDS[id] ?? 0))
+  return Math.min(Math.floor(chunkMinutes * 60 / 2) - 1, 300, Math.max(LIVE_OVERLAP_SECONDS, longest + 30))
+}
 export const MAX_LIVE_CHANNELS = 30
 export const MAX_LIVE_SESSIONS = 2
 
@@ -393,7 +406,7 @@ export interface LiveClipCandidate {
 /** A clip already kept for posting, on the live stream's own timeline. */
 export interface KeptLiveClip { start: number; end: number; keptAt: number }
 
-export type LiveClipDecision = 'kept' | 'low_score' | 'duplicate' | 'hourly_limit'
+export type LiveClipDecision = 'kept' | 'low_score' | 'duplicate' | 'hourly_limit' | 'boundary'
 
 /**
  * Pick the clips of one chunk worth posting. Chunks overlap, so a moment can be
@@ -402,7 +415,7 @@ export type LiveClipDecision = 'kept' | 'low_score' | 'duplicate' | 'hourly_limi
  */
 export function selectLiveClips(
   clips: readonly LiveClipCandidate[],
-  chunk: { streamOffsetSeconds: number },
+  chunk: { streamOffsetSeconds: number; durationSeconds?: number | null; final?: boolean },
   kept: readonly KeptLiveClip[],
   options: { minScore: number; maxPostsPerHour: number; now: number }
 ): { indices: number[]; kept: KeptLiveClip[]; decisions: { clip: LiveClipCandidate; decision: LiveClipDecision }[] } {
@@ -418,8 +431,11 @@ export function selectLiveClips(
       const overlap = Math.min(end, item.end) - Math.max(start, item.start)
       return overlap > 0.5 * Math.min(length, Math.max(0.001, item.end - item.start))
     })
+    const cutByEnd = !chunk.final && chunk.durationSeconds != null &&
+      clip.end_time_ms / 1000 >= chunk.durationSeconds - LIVE_BOUNDARY_MARGIN_SECONDS
     let decision: LiveClipDecision = 'kept'
-    if (!(clip.virality_score >= options.minScore)) decision = 'low_score'
+    if (cutByEnd) decision = 'boundary'
+    else if (!(clip.virality_score >= options.minScore)) decision = 'low_score'
     else if (duplicate) decision = 'duplicate'
     else if (recent() >= options.maxPostsPerHour) decision = 'hourly_limit'
     decisions.push({ clip, decision })

@@ -423,3 +423,8 @@ def test_a_stream_that_stays_unreachable_ends_with_an_error(tmp_path):
     with pytest.raises(LiveCaptureError) as error:
         run_capture(tmp_path, FlakyStream(50, failures=100), chunk_seconds=60, overlap_seconds=0)
     assert error.value.reason == 'network'
+
+
+def test_only_the_last_chunk_is_final(tmp_path):
+    _, _, chunks, _ = run_capture(tmp_path, FakeStream(110), chunk_seconds=60, overlap_seconds=10)
+    assert [c.final for c, _ in chunks] == [False, False, False, True]

@@ -104,6 +104,8 @@ class ClippingJobRequest:
     keyterms: Optional[list[str]] = None
     # Live recordings: a summary of the chat's reactions, on this video's timeline.
     audience_notes: Optional[str] = None
+    # Live recordings: where this part sits in the live (what comes before and after it).
+    context_notes: Optional[str] = None
     layout_style: str = LayoutStyle.AUTO
     # "tight" cuts dead air and filler words; "natural" keeps original timing.
     pacing: str = "tight"
@@ -338,6 +340,7 @@ class AIClippingPipeline:
                 end_time_seconds=request.end_time_seconds,
                 aspect_ratio=request.aspect_ratio,
                 audience_notes=request.audience_notes,
+                context_notes=request.context_notes,
             )
             stage_timings["planning"] = time.perf_counter() - stage_start
             logger.info(f"Planned {len(clip_plan.segments)} clips")

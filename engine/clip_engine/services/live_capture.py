@@ -128,6 +128,8 @@ class Chunk:
     # (seconds into the chunk, broadcast Unix time, length) per recorded segment that had
     # a program date-time: maps chat messages onto the chunk's own timeline.
     timeline: tuple = ()
+    # The recording's last chunk (stream ended or recording stopped): nothing follows it.
+    final: bool = False
 
 
 def live_channel(url: str) -> LiveChannel:
@@ -652,6 +654,7 @@ class HlsCapture:
             duration_seconds=sum(item.duration for item in items),
             lead_in_seconds=lead_in_seconds,
             timeline=_timeline(items),
+            final=final,
         ))
 
     @staticmethod
