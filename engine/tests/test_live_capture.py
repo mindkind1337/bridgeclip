@@ -42,9 +42,24 @@ def test_format_selection_prefers_best_muxed_hls_at_or_below_1080p():
         {'protocol': 'm3u8_native', 'url': 'd', 'height': 1080, 'fps': 60, 'vcodec': 'avc1', 'acodec': 'none'},
         {'protocol': 'https', 'url': 'e', 'height': 720, 'vcodec': 'avc1', 'acodec': 'mp4a'},
     ]}
-    assert module.select_live_format(info)['url'] == 'c'
+    video, audio = module.select_live_formats(info)
+    assert (video['url'], audio) == ('c', None)
     with pytest.raises(LiveCaptureError):
-        module.select_live_format({'formats': [{'protocol': 'https', 'url': 'x'}]})
+        module.select_live_formats({'formats': [{'protocol': 'https', 'url': 'x'}]})
+
+
+def test_youtube_split_tracks_pick_video_and_audio_playlists():
+    # YouTube live: audio-only 233/234 and video-only variants, no muxed format.
+    info = {'formats': [
+        {'format_id': '233', 'protocol': 'm3u8_native', 'url': 'a1', 'vcodec': 'none', 'acodec': None},
+        {'format_id': '234', 'protocol': 'm3u8_native', 'url': 'a2', 'vcodec': 'none', 'acodec': None},
+        {'format_id': '232', 'protocol': 'm3u8_native', 'url': 'v720', 'height': 720, 'vcodec': 'avc1', 'acodec': 'none'},
+        {'format_id': '270', 'protocol': 'm3u8_native', 'url': 'v1080', 'height': 1080, 'vcodec': 'avc1', 'acodec': 'none'},
+    ]}
+    video, audio = module.select_live_formats(info)
+    assert (video['url'], audio['url']) == ('v1080', 'a2')
+    with pytest.raises(LiveCaptureError):
+        module.select_live_formats({'formats': info['formats'][2:]})
 
 
 def test_resolve_distinguishes_offline_from_failure():
@@ -127,17 +142,20 @@ class FakeStream:
         return url.rsplit('/', 1)[1].encode(), url
 
 
-def run_capture(tmp_path, stream, **kwargs):
+def run_capture(tmp_path, stream, audio_url=None, **kwargs):
     chunks = []
     resolves = []
 
     def resolve(channel):
         resolves.append(channel)
-        return LiveStream('https://cdn.test/live.m3u8', 'title', 'Streamer', 'twitch', 1080)
+        return LiveStream('https://cdn.test/live.m3u8', 'title', 'Streamer', 'twitch', 1080, audio_url)
 
-    def remux(ts_path, mp4_path):
+    def remux(ts_path, mp4_path, audio_path=None):
         with open(ts_path, 'rb') as src, open(mp4_path, 'wb') as dst:
             dst.write(src.read())
+            if audio_path:
+                with open(audio_path, 'rb') as sound:
+                    dst.write(b'|' + sound.read())
 
     def on_chunk(chunk):
         with open(chunk.path, 'rb') as handle:
@@ -211,3 +229,41 @@ def test_chunk_names_are_readable_and_safe():
     import time
     name = module.chunk_filename('Str/eam<er>', time.strptime('2026-09-27 21:10', '%Y-%m-%d %H:%M'), 3)
     assert name == 'Streamer live 2026-09-27 21h10 (partie 3).mp4'
+
+
+class SplitStream(FakeStream):
+    """Video and audio playlists with shared numbering; audio can lag or lose segments."""
+
+    def __init__(self, total, audio_lag=0, missing_audio=(), **kwargs):
+        super().__init__(total, **kwargs)
+        self.audio_lag, self.missing_audio = audio_lag, set(missing_audio)
+
+    def fetch(self, url, max_bytes):
+        if url.endswith('audio.m3u8'):
+            available = max(0, self.available - self.audio_lag)
+            first = max(0, available - 6)
+            lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:2', f'#EXT-X-MEDIA-SEQUENCE:{first}']
+            for n in range(first, available):
+                lines += ['#EXTINF:2.0,', f'aud{n}.aac']
+            return '\n'.join(lines).encode(), url
+        if url.endswith('.aac') and int(url.rsplit('aud', 1)[1][:-4]) in self.missing_audio:
+            raise OSError('reset')
+        return super().fetch(url, max_bytes)
+
+
+def test_split_audio_is_recorded_alongside_video(tmp_path):
+    stream = SplitStream(40, audio_lag=3)
+    _, reason, chunks, _ = run_capture(tmp_path, stream, audio_url='https://cdn.test/audio.m3u8',
+                                       chunk_seconds=60, overlap_seconds=0)
+    assert reason == 'ended'
+    video, audio = chunks[0][1].split('|')
+    assert video.startswith('seg0.tsseg1.ts') and audio.startswith('aud0.aacaud1.aac')
+    assert video.count('.ts') == audio.count('.aac') == 30
+
+
+def test_segments_missing_a_track_are_dropped_to_keep_sync(tmp_path):
+    capture, _, chunks, _ = run_capture(tmp_path, SplitStream(40, missing_audio={3}),
+                                        audio_url='https://cdn.test/audio.m3u8', chunk_seconds=60, overlap_seconds=0)
+    video, audio = chunks[0][1].split('|')
+    assert 'seg3.ts' not in video and 'aud3.aac' not in audio
+    assert capture.gaps == 1

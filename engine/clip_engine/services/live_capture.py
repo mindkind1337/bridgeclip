@@ -30,6 +30,7 @@ MAX_LIVE_HEIGHT = 1080
 REQUEST_TIMEOUT_SECONDS = 20
 SEGMENT_ATTEMPTS = 3
 REMUX_TIMEOUT_SECONDS = 10 * 60
+MAX_WAITING_SEGMENTS = 60
 
 TWITCH_LOGIN = re.compile(r"[A-Za-z0-9_]{1,25}")
 YOUTUBE_HANDLE = re.compile(r"@[A-Za-z0-9._-]{3,30}")
@@ -65,6 +66,8 @@ class LiveStream:
     channel: str
     platform: str
     height: int
+    # YouTube serves live audio as its own playlist, numbered like the video's.
+    audio_playlist_url: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -121,21 +124,35 @@ def live_channel(url: str) -> LiveChannel:
     raise LiveCaptureError("Unsupported live channel", "unsupported_channel")
 
 
-def select_live_format(info: dict) -> dict:
-    """Pick the best muxed HLS variant at or below 1080p."""
-    candidates = []
-    for fmt in info.get("formats") or []:
-        if not isinstance(fmt, dict) or fmt.get("protocol") not in ("m3u8", "m3u8_native"):
-            continue
-        if fmt.get("vcodec") == "none" or fmt.get("acodec") == "none" or not fmt.get("url"):
-            continue
+def _has(fmt: dict, kind: str) -> bool:
+    return fmt.get(kind) not in ("none", None)
+
+
+def select_live_formats(info: dict) -> tuple[dict, Optional[dict]]:
+    """Pick the best HLS video at or below 1080p, plus a separate audio track if needed.
+
+    Muxed variants (Twitch) are preferred. YouTube lists video-only variants
+    and audio-only playlists instead.
+    """
+    hls = [fmt for fmt in info.get("formats") or []
+           if isinstance(fmt, dict) and fmt.get("protocol") in ("m3u8", "m3u8_native") and fmt.get("url")]
+
+    def usable_video(fmt: dict) -> bool:
         height = fmt.get("height") or 0
-        if not isinstance(height, (int, float)) or height > MAX_LIVE_HEIGHT:
-            continue
-        candidates.append(fmt)
-    if not candidates:
+        return _has(fmt, "vcodec") and isinstance(height, (int, float)) and height <= MAX_LIVE_HEIGHT
+
+    def video_rank(fmt: dict):
+        return (fmt.get("height") or 0, fmt.get("fps") or 0, fmt.get("tbr") or 0)
+
+    muxed = [fmt for fmt in hls if usable_video(fmt) and _has(fmt, "acodec")]
+    if muxed:
+        return max(muxed, key=video_rank), None
+    video = [fmt for fmt in hls if usable_video(fmt) and fmt.get("acodec") == "none"]
+    audio = [fmt for fmt in hls if fmt.get("vcodec") == "none" and not fmt.get("height")]
+    if not video or not audio:
         raise LiveCaptureError("No recordable live format", "no_live_format")
-    return max(candidates, key=lambda fmt: (fmt.get("height") or 0, fmt.get("fps") or 0, fmt.get("tbr") or 0))
+    return (max(video, key=video_rank),
+            max(audio, key=lambda fmt: (fmt.get("abr") or fmt.get("tbr") or 0, str(fmt.get("format_id")))))
 
 
 def _is_not_live_error(exc: Exception) -> bool:
@@ -171,7 +188,7 @@ def resolve_live_stream(channel: LiveChannel, extract: Callable[[LiveChannel], d
         raise LiveCaptureError("Live stream could not be resolved", "resolve_failed") from exc
     if not isinstance(info, dict) or not (info.get("is_live") is True or info.get("live_status") == "is_live"):
         return None
-    fmt = select_live_format(info)
+    fmt, audio = select_live_formats(info)
     channel_name = info.get("uploader") or info.get("channel") or info.get("uploader_id") or channel.url.rsplit("/", 2)[-2]
     return LiveStream(
         playlist_url=fmt["url"],
@@ -179,6 +196,7 @@ def resolve_live_stream(channel: LiveChannel, extract: Callable[[LiveChannel], d
         channel=str(channel_name)[:100],
         platform=channel.platform,
         height=int(fmt.get("height") or 0),
+        audio_playlist_url=audio["url"] if audio else None,
     )
 
 
@@ -270,15 +288,17 @@ def fetch_public(url: str, max_bytes: int, timeout: float = REQUEST_TIMEOUT_SECO
     raise LiveCaptureError("Live redirect could not be followed", "redirect")
 
 
-def remux_chunk(ts_path: str, mp4_path: str) -> None:
-    """Copy local MPEG-TS into MP4 without re-encoding or network access."""
-    cmd = [
-        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-protocol_whitelist", "file", "-format_whitelist", "mpegts",
-        "-fflags", "+genpts+discardcorrupt", "-i", ts_path,
-        "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
-        "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", mp4_path,
-    ]
+def remux_chunk(ts_path: str, mp4_path: str, audio_path: Optional[str] = None) -> None:
+    """Copy local MPEG-TS (and a separate AAC track) into MP4 without re-encoding or network access."""
+    cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+           "-protocol_whitelist", "file", "-format_whitelist", "mpegts",
+           "-fflags", "+genpts+discardcorrupt", "-f", "mpegts", "-i", ts_path]
+    if audio_path:
+        cmd += ["-protocol_whitelist", "file", "-format_whitelist", "aac", "-f", "aac", "-i", audio_path,
+                "-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
+    cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", mp4_path]
     run_media(cmd, timeout=REMUX_TIMEOUT_SECONDS, check=True)
 
 
@@ -299,7 +319,7 @@ class HlsCapture:
                  chunk_seconds: float = 600, overlap_seconds: float = 90,
                  resolve: Callable[[LiveChannel], Optional[LiveStream]] = resolve_live_stream,
                  fetch: Callable[[str, int], tuple[bytes, str]] = fetch_public,
-                 remux: Callable[[str, str], None] = remux_chunk,
+                 remux: Callable[..., None] = remux_chunk,
                  clock: Callable[[], float] = time.monotonic,
                  stop_event: Optional[threading.Event] = None,
                  offline_polls: int = 3,
@@ -327,9 +347,10 @@ class HlsCapture:
         self.content_seconds = 0.0
         self.gaps = 0
         self.skipped_ads = 0
-        # (path, duration, stream offset) of segments in the chunk being built.
-        self.current: list[tuple[str, float, float]] = []
-        self.lead_in: list[tuple[str, float, float]] = []
+        # (video path, audio path or None, duration, stream offset) of the segments
+        # in the chunk being built.
+        self.current: list[tuple[str, Optional[str], float, float]] = []
+        self.lead_in: list[tuple[str, Optional[str], float, float]] = []
 
     def run(self) -> str:
         """Return why recording stopped: "offline", "ended", "stopped" or "limit"."""
@@ -340,6 +361,7 @@ class HlsCapture:
         self.on_status("recording")
         began = self.clock()
         last_sequence: Optional[int] = None
+        waiting: dict[int, Segment] = {}
         misses = 0
         try:
             while True:
@@ -350,8 +372,9 @@ class HlsCapture:
                     self._flush(final=True)
                     return "limit"
                 try:
-                    body, final_url = self.fetch(self.stream.playlist_url, MAX_PLAYLIST_BYTES)
-                    playlist = parse_media_playlist(body.decode("utf-8", errors="replace"), final_url)
+                    playlist = self._playlist(self.stream.playlist_url)
+                    audio = ({s.sequence: s for s in self._playlist(self.stream.audio_playlist_url).segments}
+                             if self.stream.audio_playlist_url else None)
                 except PlaylistExpired:
                     stream = self.resolve(self.channel)
                     if stream is None:
@@ -365,19 +388,37 @@ class HlsCapture:
                     misses = 0
                     continue
                 misses = 0
-                fresh = [s for s in playlist.segments if last_sequence is None or s.sequence > last_sequence]
-                if fresh and last_sequence is not None and fresh[0].sequence > last_sequence + 1:
+                # Segments already seen but not recorded yet wait here: the video
+                # playlist slides on while a lagging audio playlist catches up.
+                seen = max([last_sequence if last_sequence is not None else -1, *waiting])
+                fresh = [s for s in playlist.segments if seen < 0 or s.sequence > seen]
+                if fresh and seen >= 0 and fresh[0].sequence > seen + 1:
                     self.gaps += 1
-                    logger.warning("Live playlist skipped %d segment(s)", fresh[0].sequence - last_sequence - 1)
-                for segment in fresh:
+                    logger.warning("Live playlist skipped %d segment(s)", fresh[0].sequence - seen - 1)
+                waiting.update((s.sequence, s) for s in fresh)
+                while len(waiting) > MAX_WAITING_SEGMENTS:
+                    last_sequence = waiting.pop(min(waiting)).sequence
+                    self.gaps += 1
+                for sequence in sorted(waiting):
                     if self.stop_event.is_set():
                         break
-                    last_sequence = segment.sequence
+                    segment = waiting[sequence]
+                    audio_segment = None
+                    if audio is not None:
+                        audio_segment = audio.get(sequence)
+                        if audio_segment is None:
+                            if not audio or max(audio) < sequence:
+                                break  # the audio playlist lags behind; retry on the next poll
+                            self.gaps += 1
+                            last_sequence = waiting.pop(sequence).sequence
+                            continue
+                    del waiting[sequence]
+                    last_sequence = sequence
                     if is_ad_segment(segment, self.stream.platform):
                         self.skipped_ads += 1
                         continue
-                    self._record(segment)
-                    if sum(item[1] for item in self.current) >= self.chunk_seconds:
+                    self._record(segment, audio_segment)
+                    if sum(item[2] for item in self.current) >= self.chunk_seconds:
                         self._flush(final=False)
                 if playlist.ended:
                     self._flush(final=True)
@@ -386,61 +427,76 @@ class HlsCapture:
         finally:
             shutil.rmtree(self.segments_dir, ignore_errors=True)
 
-    def _record(self, segment: Segment) -> None:
-        path = os.path.join(self.segments_dir, f"{segment.sequence}.ts")
+    def _playlist(self, url: str) -> MediaPlaylist:
+        body, final_url = self.fetch(url, MAX_PLAYLIST_BYTES)
+        return parse_media_playlist(body.decode("utf-8", errors="replace"), final_url)
+
+    def _download(self, uri: str) -> Optional[bytes]:
         for attempt in range(SEGMENT_ATTEMPTS):
             try:
-                data, _ = self.fetch(segment.uri, MAX_SEGMENT_BYTES)
-                break
+                data, _ = self.fetch(uri, MAX_SEGMENT_BYTES)
+                return data
             except PlaylistExpired:
-                self.gaps += 1
-                return
+                return None
             except LiveCaptureError:
                 raise
             except Exception:
                 if attempt == SEGMENT_ATTEMPTS - 1:
-                    self.gaps += 1
-                    logger.warning("Live segment could not be downloaded; continuing")
-                    return
+                    return None
                 self.stop_event.wait(1)
+        return None
+
+    def _record(self, segment: Segment, audio_segment: Optional[Segment] = None) -> None:
+        # Keep the tracks aligned: a segment counts only when every track arrived.
+        video = self._download(segment.uri)
+        audio = self._download(audio_segment.uri) if audio_segment else None
+        if video is None or (audio_segment and audio is None):
+            self.gaps += 1
+            logger.warning("Live segment could not be downloaded; continuing")
+            return
+        path = os.path.join(self.segments_dir, f"{segment.sequence}.ts")
         with open(path, "wb") as handle:
-            handle.write(data)
-        self.current.append((path, segment.duration, self.content_seconds))
+            handle.write(video)
+        audio_path = None
+        if audio is not None:
+            audio_path = os.path.join(self.segments_dir, f"{segment.sequence}.aac")
+            with open(audio_path, "wb") as handle:
+                handle.write(audio)
+        self.current.append((path, audio_path, segment.duration, self.content_seconds))
         self.content_seconds += segment.duration
 
     def _flush(self, final: bool) -> None:
-        new_seconds = sum(item[1] for item in self.current)
+        new_seconds = sum(item[2] for item in self.current)
         if not self.current or (final and new_seconds < MIN_FINAL_CHUNK_SECONDS):
             self._discard(self.lead_in + self.current)
             self.lead_in, self.current = [], []
             return
         self.part += 1
         items = self.lead_in + self.current
-        lead_in_seconds = sum(item[1] for item in self.lead_in)
+        lead_in_seconds = sum(item[2] for item in self.lead_in)
         ts_path = os.path.join(self.work_dir, f"part-{self.part}.ts")
+        audio_path = os.path.join(self.work_dir, f"part-{self.part}.aac") if items[0][1] else None
         mp4_path = os.path.join(self.work_dir, chunk_filename(self.stream.channel, self.started, self.part))
-        written = 0
-        with open(ts_path, "wb") as out:
-            for path, _, _ in items:
-                with open(path, "rb") as handle:
-                    while block := handle.read(1024 * 1024):
-                        written += len(block)
-                        if written > MAX_CHUNK_BYTES:
-                            raise LiveCaptureError("Live chunk exceeded the size limit", "too_large")
-                        out.write(block)
         try:
-            self.remux(ts_path, mp4_path)
+            _concatenate([item[0] for item in items], ts_path)
+            if audio_path:
+                _concatenate([item[1] for item in items], audio_path)
+                self.remux(ts_path, mp4_path, audio_path)
+            else:
+                self.remux(ts_path, mp4_path)
         finally:
             _remove(ts_path)
+            if audio_path:
+                _remove(audio_path)
         # Keep the tail of this chunk as the next chunk's lead-in so moments
         # that straddle a boundary are seen whole at least once.
-        tail: deque[tuple[str, float, float]] = deque()
+        tail: deque = deque()
         tail_seconds = 0.0
         for item in reversed(self.current):
             if tail_seconds >= self.overlap_seconds:
                 break
             tail.appendleft(item)
-            tail_seconds += item[1]
+            tail_seconds += item[2]
         self._discard([item for item in items if item not in tail])
         self.lead_in, self.current = ([] if final else list(tail)), []
         if final:
@@ -448,15 +504,29 @@ class HlsCapture:
         self.on_chunk(Chunk(
             part=self.part,
             path=mp4_path,
-            stream_offset_seconds=items[0][2],
-            duration_seconds=sum(item[1] for item in items),
+            stream_offset_seconds=items[0][3],
+            duration_seconds=sum(item[2] for item in items),
             lead_in_seconds=lead_in_seconds,
         ))
 
     @staticmethod
-    def _discard(items: Iterable[tuple[str, float, float]]) -> None:
-        for path, _, _ in items:
-            _remove(path)
+    def _discard(items: Iterable[tuple]) -> None:
+        for video_path, audio_path, _, _ in items:
+            _remove(video_path)
+            if audio_path:
+                _remove(audio_path)
+
+
+def _concatenate(paths: list[str], output: str) -> None:
+    written = 0
+    with open(output, "wb") as out:
+        for path in paths:
+            with open(path, "rb") as handle:
+                while block := handle.read(1024 * 1024):
+                    written += len(block)
+                    if written > MAX_CHUNK_BYTES:
+                        raise LiveCaptureError("Live chunk exceeded the size limit", "too_large")
+                    out.write(block)
 
 
 def _remove(path: str) -> None:
