@@ -8,6 +8,7 @@ import { SettingsPage } from './pages/SettingsPage'
 import { AccountsPage } from './pages/AccountsPage'
 import { PostsPage } from './pages/PostsPage'
 import { AutomationsPage } from './pages/AutomationsPage'
+import { LivePage } from './pages/LivePage'
 import { BridgeClipLogo } from './components/brand/BridgeClipLogo'
 import { useSettingsStore } from './store/use-settings-store'
 import { useJobStore } from './store/use-job-store'
@@ -56,7 +57,7 @@ export default function App(): React.JSX.Element {
     return () => unsubscribes.forEach((unsubscribe) => unsubscribe())
   }, [])
 
-  // ⌘1 Create, ⌘2 Library, ⌘3 Jobs, ⌘4 Accounts, ⌘5 Posts, ⌘6 Automations, ⌘, Settings,
+  // ⌘1 Create, ⌘2 Library, ⌘3 Jobs, ⌘4 Accounts, ⌘5 Posts, ⌘6 Automations, ⌘7 Live, ⌘, Settings,
   // ⌘\ collapse or expand the sidebar (Ctrl on Windows/Linux).
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent): void => {
@@ -93,6 +94,7 @@ export default function App(): React.JSX.Element {
           {page === 'accounts' && <AccountsPage onNavigate={setPage} />}
           {page === 'posts' && <PostsPage onNavigate={setPage} />}
           {page === 'automations' && <AutomationsPage onNavigate={setPage} />}
+          {page === 'live' && <LivePage onNavigate={setPage} />}
           {page === 'settings' && <SettingsPage showUpdates={showUpdates} />}
         </Layout>
       ) : (

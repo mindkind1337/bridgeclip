@@ -228,7 +228,7 @@ def test_stop_flushes_what_was_recorded(tmp_path):
 def test_chunk_names_are_readable_and_safe():
     import time
     name = module.chunk_filename('Str/eam<er>', time.strptime('2026-09-27 21:10', '%Y-%m-%d %H:%M'), 3)
-    assert name == 'Streamer live 2026-09-27 21h10 (partie 3).mp4'
+    assert name == 'Streamer live 2026-09-27 21.10 (part 3).mp4'
 
 
 class SplitStream(FakeStream):

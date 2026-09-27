@@ -117,7 +117,7 @@ function writeRun(library, jobId, clips) {
   const run = path.join(library, jobId)
   fs.mkdirSync(run, { recursive: true })
   const manifest = {
-    job_id: jobId, source_video_title: 'streamer live (partie 1)', total_clips: clips.length,
+    job_id: jobId, source_video_title: 'streamer live (part 1)', total_clips: clips.length,
     clips: clips.map((clip, index) => {
       const file = path.join(run, `clip_0${index}.mp4`)
       fs.writeFileSync(file, 'clip')

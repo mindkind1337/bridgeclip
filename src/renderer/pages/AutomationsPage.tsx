@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Pencil, Play, Plus, RefreshCw, Trash2, Workflow, X } from 'lucide-react'
-import { AUTOMATION_PLATFORMS, needsTikTokReview, nextAutomationContent, type Automation, type AutomationContent, type AutomationContentStatus, type AutomationUpdate } from '../../shared/automations'
+import { AUTOMATION_PLATFORMS, INTERVAL_MINUTES, needsTikTokReview, nextAutomationContent, scheduleOf, type Automation, type AutomationContent, type AutomationContentStatus, type AutomationUpdate } from '../../shared/automations'
 import { isPostableAccount, isValidProfileName } from '../../shared/zernio'
 import { AutomationTikTokReviewDialog } from '../components/AutomationTikTokReviewDialog'
 import { PlatformIcon, platformName } from '../components/PlatformIcon'
@@ -24,7 +24,7 @@ import { cn, errorMessage, formatRelativeDate } from '../lib/utils'
 import type { Page as PageName } from '../components/Sidebar'
 
 function draftFor(automation: Automation): AutomationUpdate {
-  return { name: automation.name, enabled: automation.enabled, profileId: automation.profileId, metadataMode: automation.metadataMode, accounts: automation.accounts, times: automation.times, timezone: automation.timezone, youtubeVisibility: automation.youtubeVisibility, youtubeMadeForKids: automation.youtubeMadeForKids }
+  return { name: automation.name, enabled: automation.enabled, profileId: automation.profileId, metadataMode: automation.metadataMode, accounts: automation.accounts, times: automation.times, schedule: scheduleOf(automation), timezone: automation.timezone, youtubeVisibility: automation.youtubeVisibility, youtubeMadeForKids: automation.youtubeMadeForKids }
 }
 
 const SELECTED_STORAGE_KEY = 'bridgeclip.automations.selectedId'
@@ -37,8 +37,24 @@ function rememberSelection(id: string | null): void {
 }
 
 /** What the backend requires before an automation can be switched on. */
-function missingSetup(value: Pick<AutomationUpdate, 'profileId' | 'accounts' | 'times'>): boolean {
-  return !value.profileId || value.accounts.length === 0 || value.times.length === 0
+function missingSetup(value: Pick<AutomationUpdate, 'profileId' | 'accounts' | 'times' | 'schedule'>): boolean {
+  const continuous = scheduleOf(value).mode === 'interval'
+  return !value.profileId || value.accounts.length === 0 || (!continuous && value.times.length === 0)
+}
+
+function formatInterval(minutes: number): string {
+  if (minutes % 60 === 0) return minutes === 60 ? 'hour' : `${minutes / 60} hours`
+  return `${minutes} minutes`
+}
+
+/** When a continuous automation posts next, if it has a clip ready. */
+function nextIntervalLabel(automation: Automation): string {
+  const schedule = scheduleOf(automation)
+  if (schedule.mode !== 'interval') return '—'
+  if (!nextAutomationContent(automation)) return 'when a clip is ready'
+  const due = (automation.lastRunAt ? Date.parse(automation.lastRunAt) : 0) + schedule.minutes * 60_000
+  if (!Number.isFinite(due) || due <= Date.now()) return 'now'
+  return `in ${Math.max(1, Math.ceil((due - Date.now()) / 60_000))} min`
 }
 
 function formatTime(time: string): string {
@@ -287,7 +303,7 @@ export function AutomationsPage({ onNavigate }: { onNavigate: (page: PageName) =
   const setupTodo = draft ? [
     !draft.profileId && 'choose a profile',
     draft.accounts.length === 0 && 'select an account',
-    draft.times.length === 0 && 'add a daily time',
+    scheduleOf(draft).mode === 'slots' && draft.times.length === 0 && 'add a daily time',
     counts.queued === 0 && 'add clips',
     draft.metadataMode === 'ai' && aiKeysMissing && 'add an OpenRouter key'
   ].filter((step): step is string => Boolean(step)) : []
@@ -359,7 +375,8 @@ export function AutomationsPage({ onNavigate }: { onNavigate: (page: PageName) =
                         {counts.needs_review > 0 && <><Sep /><span className="text-warning">{counts.needs_review} to check</span></>}
                         <Sep />
                         {selected.enabled
-                          ? <span>Next run <span className="text-ink">{nextRunLabel(selected.times, selected.timezone) ?? '—'}</span></span>
+                          ? <span>Next run <span className="text-ink">{scheduleOf(selected).mode === 'interval'
+                            ? nextIntervalLabel(selected) : nextRunLabel(selected.times, selected.timezone) ?? '—'}</span></span>
                           : <span>Paused</span>}
                         <Sep />
                         <span>Last run <span className="text-ink">{selected.lastRunAt ? formatRelativeDate(selected.lastRunAt) : 'never'}</span></span>
@@ -475,8 +492,33 @@ export function AutomationsPage({ onNavigate }: { onNavigate: (page: PageName) =
                   <Row
                     label="Schedule"
                     labelId="automation-schedule"
-                    hint="One clip posts at each time, daily. BridgeClip must be open; after sleep, a run can start up to 5 minutes late."
+                    hint={draft.schedule?.mode === 'interval'
+                      ? `The next queued clip posts once ${formatInterval(draft.schedule.minutes)} have passed since the last post. Use this for live clips. BridgeClip must be open.`
+                      : 'One clip posts at each time, daily. BridgeClip must be open; after sleep, a run can start up to 5 minutes late.'}
                   >
+                    <div className="mb-1.5">
+                      <Segmented
+                        size="sm"
+                        label="Posting schedule"
+                        value={scheduleOf(draft).mode}
+                        onChange={(mode) => setDraft({ ...draft, schedule: mode === 'interval'
+                          ? { mode: 'interval', minutes: INTERVAL_MINUTES.default } : { mode: 'slots' } })}
+                        options={[{ value: 'slots', label: 'Daily times' }, { value: 'interval', label: 'Continuous' }]}
+                      />
+                    </div>
+                    {draft.schedule?.mode === 'interval' ? (
+                      <div className="flex flex-wrap items-center gap-1.5 text-2xs text-ink-muted">
+                        <span>At most one clip every</span>
+                        <Select
+                          aria-label="Minimum time between posts"
+                          size="sm"
+                          className="w-[130px]"
+                          value={String(draft.schedule.minutes)}
+                          onChange={(value) => setDraft({ ...draft, schedule: { mode: 'interval', minutes: Number(value) } })}
+                          options={[5, 10, 15, 20, 30, 45, 60, 120, 240].map((minutes) => ({ value: String(minutes), label: formatInterval(minutes) }))}
+                        />
+                      </div>
+                    ) : (
                     <div role="group" aria-labelledby="automation-schedule" className="flex flex-wrap items-center gap-1">
                       {draft.times.map((time) => (
                         <span key={time} className="inline-flex h-7 items-center rounded-full border border-white/[0.08] bg-white/[0.03] pl-2.5 pr-0.5 font-mono text-2xs tabular text-ink">
@@ -501,6 +543,7 @@ export function AutomationsPage({ onNavigate }: { onNavigate: (page: PageName) =
                         searchPlaceholder="Search time zones"
                       />
                     </div>
+                    )}
                   </Row>
 
                   <Row

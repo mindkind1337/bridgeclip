@@ -305,7 +305,7 @@ def remux_chunk(ts_path: str, mp4_path: str, audio_path: Optional[str] = None) -
 def chunk_filename(channel: str, started: time.struct_time, part: int) -> str:
     """Readable name: it becomes the run's title in the library."""
     safe = re.sub(r"[^\w .-]+", "", channel, flags=re.UNICODE).strip(" .") or "live"
-    return f"{safe[:60]} live {time.strftime('%Y-%m-%d %Hh%M', started)} (partie {part}).mp4"
+    return f"{safe[:60]} live {time.strftime('%Y-%m-%d %H.%M', started)} (part {part}).mp4"
 
 
 class HlsCapture:
