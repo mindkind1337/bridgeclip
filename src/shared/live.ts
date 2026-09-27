@@ -44,6 +44,8 @@ export interface LiveSessionState {
   processingPart: number | null
   clipsMade: number
   clipsQueued: number
+  /** The part being recorded now: new content so far, its target length, and what was skipped. */
+  recording: { part: number; seconds: number; targetSeconds: number; gaps: number; ads: number } | null
   startedAt: string | null
   endedAt: string | null
   message: string | null

@@ -194,7 +194,8 @@ test('the native picker authorizes media and shell opening rejects aliased appli
       './automations': {},
       './live/live-channels': {},
       './live/live-monitor': {},
-      './live/live-session': {}
+      './live/live-session': {},
+      './live/live-player': {}
     })
     ipc.registerIpcHandlers(() => window)
     assert.equal(handlers.has('files:registerMedia'), false)

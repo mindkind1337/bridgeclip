@@ -77,6 +77,7 @@ export interface BridgeClipAPI {
     start: (id: string) => Promise<LiveOverview>
     stop: (id: string) => Promise<LiveOverview>
     checkNow: () => Promise<LiveOverview>
+    watch: (id: string) => Promise<void>
     onUpdate: (callback: (overview: LiveOverview) => void) => () => void
   }
   settings: {
@@ -206,6 +207,7 @@ const api: BridgeClipAPI = {
     start: (id) => ipcRenderer.invoke('live:session:start', id),
     stop: (id) => ipcRenderer.invoke('live:session:stop', id),
     checkNow: () => ipcRenderer.invoke('live:check'),
+    watch: (id) => ipcRenderer.invoke('live:watch', id),
     onUpdate: (callback) => subscribe('live:update', callback)
   },
   settings: {

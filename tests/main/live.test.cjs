@@ -325,3 +325,37 @@ test('a check requested during another check runs right after it', async () => {
     main.stopAllLiveForQuit()
   } finally { cleanup() }
 })
+
+test('recording progress is shown only when well formed and cleared at the end', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-progress-')
+  try {
+    const { session, spawned, states } = sessionHarness(dir)
+    session.start()
+    const { child } = spawned[0]
+    child.send({ type: 'progress', part: 2, recorded_s: 125.5, part_s: 600, gaps: 1, ads: 15 })
+    await until(() => states.at(-1)?.recording, 'progress')
+    assert.deepEqual(states.at(-1).recording, { part: 2, seconds: 125.5, targetSeconds: 600, gaps: 1, ads: 15 })
+    for (const bad of [{ part: 0 }, { recorded_s: -1 }, { part_s: 0 }, { ads: 1.5 }, { gaps: 'x' }]) {
+      child.send({ type: 'progress', part: 3, recorded_s: 1, part_s: 600, gaps: 0, ads: 0, ...bad })
+    }
+    child.send({ type: 'stream_ended', reason: 'ended' })
+    child.emit('close', 0, null)
+    await until(() => states.at(-1)?.endedAt, 'end')
+    assert.ok(states.every((state) => !state.recording || state.recording.part === 2), 'malformed progress is ignored')
+    assert.equal(states.at(-1).recording, null)
+  } finally { cleanup() }
+})
+
+test('the player opens the channel page and stays on its platform', () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-player-')
+  try {
+    const { watchUrl, isPlayerNavigation } = loadMain("export * from './src/main/live/live-player'", { electron: fakeElectron(dir).electron })
+    assert.equal(watchUrl({ platform: 'youtube', url: 'https://www.youtube.com/@news' }), 'https://www.youtube.com/@news/live')
+    assert.equal(watchUrl({ platform: 'kick', url: 'https://kick.com/name' }), 'https://kick.com/name')
+    assert.ok(isPlayerNavigation({ platform: 'twitch' }, 'https://www.twitch.tv/other'))
+    assert.ok(isPlayerNavigation({ platform: 'twitch' }, 'https://player.twitch.tv/?channel=x'))
+    for (const url of ['https://twitch.tv.evil.test/', 'http://www.twitch.tv/x', 'https://kick.com/x', 'https://evil-twitch.tv/', 'javascript:alert(1)']) {
+      assert.equal(isPlayerNavigation({ platform: 'twitch' }, url), false, url)
+    }
+  } finally { cleanup() }
+})

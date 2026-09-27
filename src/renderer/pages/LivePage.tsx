@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
+import { ChevronDown, MonitorPlay, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
 import {
   DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, type LiveChannel, type LiveChannelInput,
   type LiveClipSettings, type LiveOverview, type LiveSessionState
@@ -47,6 +47,11 @@ const PLATFORM: Record<LiveChannel['platform'], { tile: string; icon: React.Reac
 function inputFor(channel: LiveChannel): LiveChannelInput {
   const { url, displayName, enabled, automationId, clip, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes } = channel
   return { url, displayName, enabled, automationId, clip: { ...clip, durationRanges: [...clip.durationRanges] }, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes }
+}
+
+function clock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
 function isRunning(state: LiveSessionState | undefined): boolean {
@@ -150,6 +155,7 @@ export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void 
                 onToggle={() => setExpanded(expanded === channel.id ? null : channel.id)}
                 onStart={() => void run(`start:${channel.id}`, () => getApi().live.start(channel.id))}
                 onStop={() => void run(`stop:${channel.id}`, () => getApi().live.stop(channel.id))}
+                onWatch={() => void getApi().live.watch(channel.id).catch((cause) => setError(errorMessage(cause, 'Could not open the player.')))}
                 onSave={(input) => run(`save:${channel.id}`, () => getApi().live.updateChannel(channel.id, input))}
                 onRemove={() => setConfirm({
                   title: 'Stop following this channel?',
@@ -172,7 +178,7 @@ export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void 
   )
 }
 
-function ChannelCard({ channel, state, check, automations, expanded, busy, canStart, onToggle, onStart, onStop, onSave, onRemove }: {
+function ChannelCard({ channel, state, check, automations, expanded, busy, canStart, onToggle, onStart, onStop, onWatch, onSave, onRemove }: {
   channel: LiveChannel
   state: LiveSessionState | undefined
   check: LiveOverview['checks'][string] | undefined
@@ -183,10 +189,12 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
   onToggle: () => void
   onStart: () => void
   onStop: () => void
+  onWatch: () => void
   onSave: (input: LiveChannelInput) => Promise<boolean>
   onRemove: () => void
 }): React.JSX.Element {
   const running = isRunning(state)
+  const recording = running ? state?.recording : null
   const status = state ? STATUS[state.status] : null
   const automation = automations.find((item) => item.id === channel.automationId)
 
@@ -219,9 +227,30 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
             )}
             <span>· {automation ? <>queues to <span className="text-ink">{automation.name}</span></> : 'clips stay in the Library'}</span>
           </p>
+          {recording && (
+            <div className="mt-1.5 max-w-[360px]">
+              <div className="flex justify-between text-2xs text-ink-muted">
+                <span>Recording part {recording.part} · <span className="tabular text-ink">{clock(recording.seconds)}</span> / {clock(recording.targetSeconds)}</span>
+                {(recording.ads > 0 || recording.gaps > 0) && (
+                  <span title="Twitch does not send the stream during ads; dropped segments are lost">
+                    {recording.ads > 0 && `${recording.ads} ad segment${recording.ads === 1 ? '' : 's'} skipped`}
+                    {recording.ads > 0 && recording.gaps > 0 && ' · '}
+                    {recording.gaps > 0 && `${recording.gaps} gap${recording.gaps === 1 ? '' : 's'}`}
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/[0.08]" role="progressbar" aria-label={`Part ${recording.part} recorded`}
+                aria-valuemin={0} aria-valuemax={recording.targetSeconds} aria-valuenow={Math.round(recording.seconds)}>
+                <div className="h-full rounded-full bg-danger/80 transition-[width] duration-1000"
+                  style={{ width: `${Math.min(100, (recording.seconds / recording.targetSeconds) * 100)}%` }} />
+              </div>
+            </div>
+          )}
           {state?.message && <p className={cn('mt-1 text-2xs', state.status === 'error' ? 'text-warning' : 'text-ink-muted')}>{state.message}</p>}
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          <Button size="sm" variant="ghost" icon={<MonitorPlay className="h-3.5 w-3.5" />} onClick={onWatch}
+            title="Watch and listen to this channel in a BridgeClip window">Watch</Button>
           {running ? (
             <Button size="sm" variant="secondary" icon={<Square className="h-3 w-3" />} loading={busy === `stop:${channel.id}`} onClick={onStop}
               title={state?.status === 'stopping' ? 'Stop now, without clipping the part being recorded' : 'Finish and clip the current part, then stop'}>

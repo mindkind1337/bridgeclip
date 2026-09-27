@@ -14,6 +14,7 @@ import { cancelQueuedJobsForQuit } from './job-manager'
 import { cancelZernioConnect } from './zernio/service'
 import { isAutomationMedia, startAutomationScheduler } from './automations'
 import { startLiveMonitor, stopAllLiveForQuit } from './live/live-monitor'
+import { closeLivePlayers } from './live/live-player'
 
 // Catch crashes anywhere in the main process so we get a log line instead
 // of a silent exit. Without these, an unhandled rejection in an IPC handler
@@ -246,6 +247,7 @@ app.on('before-quit', () => {
   cancelQueuedJobsForQuit()
   stopAllJobsForQuit()
   stopAllLiveForQuit()
+  closeLivePlayers()
 })
 // A sign-in still waiting for its browser redirect must not hold the loopback port.
 app.on('before-quit', () => cancelZernioConnect())

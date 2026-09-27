@@ -12,8 +12,10 @@ import { LiveSession } from './live-session'
 
 const CHECK_INTERVAL_MS = 60_000
 const PROBE_TIMEOUT_MS = 3 * 60_000
-/** After a session ends, wait before recording the same channel again. */
+/** After a stream ends, wait before recording the same channel again (a reconnecting streamer). */
 const RESTART_COOLDOWN_MS = 5 * 60_000
+/** After an engine failure, retry sooner: the stream is probably still live. */
+const RETRY_AFTER_ERROR_MS = 60_000
 const MAX_TITLE = 200
 
 const sessions = new Map<string, LiveSession>()
@@ -46,7 +48,8 @@ export function startLiveSession(channelId: unknown): LiveOverview {
   if (!loadSettings().openrouterApiKey) throw new Error('Add an OpenRouter API key in Settings before recording a live stream.')
   const session = new LiveSession(channel, (state) => { states.set(channel.id, state); publish() }, () => {
     sessions.delete(channel.id)
-    endedAt.set(channel.id, Date.now())
+    // Count the cooldown from a point that leaves only the short retry delay after a failure.
+    endedAt.set(channel.id, session.state.status === 'error' ? Date.now() - RESTART_COOLDOWN_MS + RETRY_AFTER_ERROR_MS : Date.now())
     publish()
   })
   sessions.set(channel.id, session)

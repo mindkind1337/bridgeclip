@@ -54,7 +54,7 @@ export class LiveSession {
     private readonly onExit: () => void) {
     this.outputDirectory = loadSettings().outputDirectory
     this.state = {
-      channelId: channel.id, status: 'resolving', partsDone: 0, processingPart: null, clipsMade: 0, clipsQueued: 0,
+      channelId: channel.id, status: 'resolving', partsDone: 0, processingPart: null, clipsMade: 0, clipsQueued: 0, recording: null,
       startedAt: new Date().toISOString(), endedAt: null, message: null
     }
   }
@@ -166,6 +166,14 @@ export class LiveSession {
       case 'status':
         if (message.status === 'recording' && !this.stopping) this.update({ status: 'recording' })
         break
+      case 'progress': {
+        const { part, recorded_s: seconds, part_s: target, gaps, ads } = message
+        if (Number.isInteger(part) && (part as number) >= 1 && finite(seconds) && seconds >= 0 && finite(target) && target > 0 &&
+            Number.isInteger(gaps) && (gaps as number) >= 0 && Number.isInteger(ads) && (ads as number) >= 0) {
+          this.update({ recording: { part: part as number, seconds, targetSeconds: target, gaps: gaps as number, ads: ads as number } })
+        }
+        break
+      }
       case 'chunk_started': {
         const chunk = placement(message)
         if (!chunk) break
@@ -259,7 +267,7 @@ export class LiveSession {
       try { finishRunRecord(this.outputDirectory, jobId, 'failed', 'Live recording stopped before this part was clipped.') } catch { /* Best effort. */ }
     }
     this.openJobs.clear()
-    this.update({ status, message, processingPart: null, endedAt: new Date().toISOString() })
+    this.update({ status, message, processingPart: null, recording: null, endedAt: new Date().toISOString() })
     this.onExit()
   }
 }

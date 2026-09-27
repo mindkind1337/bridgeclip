@@ -15,6 +15,7 @@ import { cancelTrackedJob, dismissJob, enqueueJob, initJobManager, listJobs, liv
 import { addLiveChannel, removeLiveChannel, updateLiveChannel } from './live/live-channels'
 import { checkLiveChannels, forgetLiveChannel, getLiveOverview, startLiveSession, stopLiveSession } from './live/live-monitor'
 import { activeLiveJobIds } from './live/live-session'
+import { openLivePlayer } from './live/live-player'
 import { logger, getLogFilePath } from './logger'
 import { assertAbsolutePath, assertMediaPath, assertTrustedSender, authorizeMedia, isTrustedExternalUrl, isWebUrl, isWithinDirectory, openAuthorizedMedia } from './security'
 import { assertPublicWebUrl } from './network-policy'
@@ -120,6 +121,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('live:session:start', (_event, id: unknown) => startLiveSession(id))
   handle('live:session:stop', (_event, id: unknown) => stopLiveSession(id))
   handle('live:check', async () => { await checkLiveChannels(); return getLiveOverview() })
+  handle('live:watch', (_event, id: unknown) => { openLivePlayer(id) })
 
   handle('automations:list', () => listAutomations())
   handle('automations:create', (_event, name: unknown) => createAutomation(name))
