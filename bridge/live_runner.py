@@ -193,7 +193,7 @@ async def record(spec: dict) -> bool:
     bridge.emit({"type": "status", "status": "resolving"})
     thread = threading.Thread(target=capture_main, name="live-capture", daemon=True)
     thread.start()
-    pipeline = AIClippingPipeline(progress_callback=lambda progress: None)
+    pipeline = AIClippingPipeline(progress_callback=chunk_progress_reporter())
     loop = asyncio.get_running_loop()
     finished = False
     while not finished:
@@ -223,11 +223,30 @@ async def record(spec: dict) -> bool:
     return True
 
 
+# Part being clipped, for the pipeline's progress callback.
+_clipping_part: dict = {"part": None, "step": None}
+
+
+def chunk_progress_reporter():
+    """Report each new pipeline step of the part being clipped (not every percent)."""
+    def report(progress) -> None:
+        part, step = _clipping_part["part"], getattr(progress, "current_step", None)
+        if part is None or not isinstance(step, str) or step == _clipping_part["step"]:
+            return
+        _clipping_part["step"] = step
+        status = progress.status.value if hasattr(progress.status, "value") else str(progress.status)
+        bridge.emit({"type": "chunk_progress", "part": part, "status": status, "step": step[:160],
+                     "percent": progress.progress_percent, "clips_done": progress.clips_completed,
+                     "clips_total": progress.total_clips})
+    return report
+
+
 async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobRequest, JobStatus) -> None:
     job_id = str(uuid.uuid4())
     placement = {"job_id": job_id, "part": chunk.part, "stream_offset_s": chunk.stream_offset_seconds,
                  "duration_s": chunk.duration_seconds, "lead_in_s": chunk.lead_in_seconds}
     bridge.emit({"type": "chunk_started", **placement})
+    _clipping_part.update(part=chunk.part, step=None)
     try:
         request = ClippingJobRequest(
             video_url=chunk.path,

@@ -49,13 +49,16 @@ test('clip selection filters by score, removes overlap duplicates and caps posts
   const first = selectLiveClips([clip(0, 10, 50, 0.9), clip(1, 100, 140, 0.6), clip(2, 200, 240, 0.8)],
     { streamOffsetSeconds: 0 }, [], { minScore: 0.7, maxPostsPerHour: 4, now })
   assert.deepEqual(first.indices, [0, 2])
+  assert.deepEqual(first.decisions.map((item) => [item.clip.clip_index, item.decision]), [[0, 'kept'], [2, 'kept'], [1, 'low_score']])
   // The next chunk starts 510 s in with a 90 s lead-in: its clip at 0–40 s is 510–550 s on the stream.
   const second = selectLiveClips([clip(0, 5, 45, 0.95), clip(1, 300, 330, 0.75)],
     { streamOffsetSeconds: 510 }, [{ start: 515, end: 552, keptAt: now - 1000 }], { minScore: 0.7, maxPostsPerHour: 4, now })
   assert.deepEqual(second.indices, [1], 'the moment already kept from the previous chunk is a duplicate')
+  assert.equal(second.decisions[0].decision, 'duplicate')
   const capped = selectLiveClips([clip(0, 0, 30, 0.9), clip(1, 60, 90, 0.95)], { streamOffsetSeconds: 0 },
     [{ start: -500, end: -470, keptAt: now - 10 * 60_000 }], { minScore: 0, maxPostsPerHour: 2, now })
   assert.deepEqual(capped.indices, [1], 'the best clip wins the last slot this hour')
+  assert.equal(capped.decisions[1].decision, 'hourly_limit')
   const later = selectLiveClips([clip(0, 0, 30, 0.9)], { streamOffsetSeconds: 0 },
     [{ start: -500, end: -470, keptAt: now - 61 * 60_000 }], { minScore: 0, maxPostsPerHour: 1, now })
   assert.deepEqual(later.indices, [0], 'posts older than an hour no longer count')
@@ -357,5 +360,47 @@ test('the player opens the channel page and stays on its platform', () => {
     for (const url of ['https://twitch.tv.evil.test/', 'http://www.twitch.tv/x', 'https://kick.com/x', 'https://evil-twitch.tv/', 'javascript:alert(1)']) {
       assert.equal(isPlayerNavigation({ platform: 'twitch' }, url), false, url)
     }
+  } finally { cleanup() }
+})
+
+
+test('the activity log says what the engine is doing and why each clip was kept or not', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-activity-')
+  try {
+    const { session, spawned, library, states } = sessionHarness(dir)
+    session.start()
+    const { child } = spawned[0]
+    child.send({ type: 'status', status: 'recording' })
+    child.send({ type: 'progress', part: 1, recorded_s: 10, part_s: 600, gaps: 0, ads: 3 })
+    child.send({ type: 'progress', part: 1, recorded_s: 20, part_s: 600, gaps: 0, ads: 6 })
+    child.send({ type: 'progress', part: 1, recorded_s: 40, part_s: 600, gaps: 2, ads: 6 })
+    const job = randomUUID()
+    child.send({ type: 'chunk_started', job_id: job, part: 1, stream_offset_s: 0, duration_s: 600, lead_in_s: 0 })
+    child.send({ type: 'chunk_progress', part: 1, step: 'Downloading video...', percent: 5 })
+    child.send({ type: 'chunk_progress', part: 1, step: 'Transcribing audio...', percent: 15 })
+    child.send({ type: 'chunk_progress', part: 1, step: `Read C:${String.fromCharCode(92)}Users${String.fromCharCode(92)}me`, percent: 20 })
+    child.send({ type: 'chunk_progress', part: 1, step: 'Fetched https://cdn.test/x', percent: 21 })
+    child.send({ type: 'chunk_progress', part: 1, step: 'Rendered 1 of 2 clips', percent: 70 })
+    await until(() => states.at(-1)?.clipping?.percent === 70, 'clipping progress')
+    assert.deepEqual(states.at(-1).clipping, { part: 1, step: 'Rendered 1 of 2 clips', percent: 70 })
+    writeRun(library, job, [[10, 50, 0.9], [100, 140, 0.4]])
+    child.send({ type: 'chunk_done', job_id: job, part: 1, stream_offset_s: 0 })
+    await until(() => states.at(-1)?.partsDone === 1, 'part done')
+    assert.equal(states.at(-1).clipping, null)
+    const lines = states.at(-1).activity.map((entry) => entry.text)
+    assert.deepEqual(lines, [
+      'Opening the stream',
+      'Live found: recording started',
+      'Twitch ad break: the stream is not sent during ads, so this time is skipped',
+      'Ad break over: recording the stream again',
+      '2 stream segment(s) could not be downloaded and were lost',
+      'Part 1 recorded (10:00): clipping it now',
+      'Part 1: Transcribing audio',
+      'Part 1: Rendered 1 of 2 clips',
+      'Part 1: 2 clips made',
+      '“Moment 0” · score 90 · kept (no automation linked)',
+      '“Moment 1” · score 40 · not posted: score below 70'
+    ])
+    assert.ok(states.at(-1).activity.every((entry) => !Number.isNaN(Date.parse(entry.at))))
   } finally { cleanup() }
 })

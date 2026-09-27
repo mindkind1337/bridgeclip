@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, MonitorPlay, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
+import { ChevronDown, ListTree, MonitorPlay, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
 import {
-  DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, type LiveChannel, type LiveChannelInput,
+  DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, type LiveActivity, type LiveChannel, type LiveChannelInput,
   type LiveClipSettings, type LiveOverview, type LiveSessionState
 } from '../../shared/live'
 import type { Automation } from '../../shared/automations'
@@ -216,7 +216,6 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
             {state && (running || state.partsDone > 0) ? (
               <>
                 <span><span className="tabular text-ink">{state.partsDone}</span> part{state.partsDone === 1 ? '' : 's'} clipped</span>
-                {state.processingPart && <span>· clipping part {state.processingPart}</span>}
                 <span>· <span className="tabular text-ink">{state.clipsMade}</span> clips</span>
                 <span>· <span className="tabular text-ink">{state.clipsQueued}</span> queued</span>
               </>
@@ -246,6 +245,18 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
               </div>
             </div>
           )}
+          {state?.clipping?.step && (
+            <div className="mt-1.5 max-w-[360px]">
+              <div className="flex justify-between gap-2 text-2xs text-ink-muted">
+                <span className="truncate">Clipping part {state.clipping.part} · <span className="text-ink">{state.clipping.step.replace(/\.\.\.$/, '')}</span></span>
+                <span className="tabular">{Math.round(state.clipping.percent)}%</span>
+              </div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/[0.08]" role="progressbar" aria-label={`Part ${state.clipping.part} clipped`}
+                aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(state.clipping.percent)}>
+                <div className="h-full rounded-full bg-accent transition-[width] duration-700" style={{ width: `${state.clipping.percent}%` }} />
+              </div>
+            </div>
+          )}
           {state?.message && <p className={cn('mt-1 text-2xs', state.status === 'error' ? 'text-warning' : 'text-ink-muted')}>{state.message}</p>}
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -264,9 +275,41 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
             icon={<ChevronDown className={cn('h-3.5 w-3.5 transition-transform', expanded && 'rotate-180')} />} />
         </div>
       </div>
+      {/* Older main processes (before a restart) send states without these fields. */}
+      {(state?.activity?.length ?? 0) > 0 && <ActivityLog entries={state!.activity} live={running} />}
       {expanded && <ChannelSettings channel={channel} automations={automations} saving={busy === `save:${channel.id}`} onSave={onSave} onRemove={onRemove} />}
     </Panel>
     </section>
+  )
+}
+
+const TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+
+/** What the live engine did, newest first: the last few lines, or everything on demand. */
+function ActivityLog({ entries, live }: { entries: LiveActivity[]; live: boolean }): React.JSX.Element {
+  const [all, setAll] = useState(false)
+  const shown = [...entries].reverse().slice(0, all ? entries.length : 4)
+  return (
+    <div className="border-t border-white/[0.06] px-3.5 py-2">
+      <div className="mb-1 flex items-center justify-between">
+        <p className="flex items-center gap-1.5 text-2xs font-medium text-ink-muted">
+          <ListTree aria-hidden className="h-3 w-3" />Activity{live && <StatusDot tone="danger" pulse className="ml-0.5" />}
+        </p>
+        {entries.length > 4 && (
+          <button type="button" className="text-2xs text-ink-subtle hover:text-ink" onClick={() => setAll(!all)}>
+            {all ? 'Show less' : `Show all ${entries.length}`}
+          </button>
+        )}
+      </div>
+      <ol aria-live="polite" className={cn('space-y-0.5', all && 'max-h-72 overflow-y-auto pr-1')}>
+        {shown.map((entry, index) => (
+          <li key={`${entry.at}-${index}`} className="flex gap-2 text-2xs leading-snug">
+            <time dateTime={entry.at} className="shrink-0 font-mono tabular text-ink-subtle">{TIME.format(new Date(entry.at))}</time>
+            <span className={cn(entry.tone === 'warn' ? 'text-warning' : entry.tone === 'good' ? 'text-success' : 'text-ink-muted')}>{entry.text}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }
 

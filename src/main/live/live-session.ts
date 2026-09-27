@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { BRIDGE_CONTRACT_VERSION } from '../../shared/job-contract'
-import { LIVE_OVERLAP_SECONDS, selectLiveClips, type KeptLiveClip, type LiveChannel, type LiveSessionState } from '../../shared/live'
+import { LIVE_OVERLAP_SECONDS, MAX_LIVE_ACTIVITY, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LiveSessionState } from '../../shared/live'
 import { addLibraryClipsToAutomation } from '../automations'
 import { getJobOutput } from '../file-manager'
 import { logger } from '../logger'
@@ -32,6 +32,25 @@ function safeText(value: unknown, fallback: string): string {
 
 function finite(value: unknown): value is number { return typeof value === 'number' && Number.isFinite(value) }
 
+/** Engine step text for the activity log: plain words and counts like "1 of 2" only. */
+function safeStep(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim() || value.length > 160 ||
+      /https?:|:\/\/|\\|(?:^|\s)\/|[A-Za-z]:[\\/]|(?:token|secret|key)\s*[:=]/i.test(value)) return null
+  return value.trim()
+}
+
+function clock(seconds: number): string {
+  const whole = Math.max(0, Math.round(seconds))
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
+const DECISION_TEXT: Record<LiveClipDecision, (minScore: number, linked: boolean) => string> = {
+  kept: (_min, linked) => linked ? 'queued for posting' : 'kept (no automation linked)',
+  low_score: (min) => `not posted: score below ${Math.round(min * 100)}`,
+  duplicate: () => 'not posted: same moment as a clip already kept',
+  hourly_limit: () => 'not posted: hourly posting limit reached'
+}
+
 interface ChunkPlacement { jobId: string; part: number; streamOffsetSeconds: number }
 
 function placement(message: Record<string, unknown>): ChunkPlacement | null {
@@ -55,7 +74,7 @@ export class LiveSession {
     this.outputDirectory = loadSettings().outputDirectory
     this.state = {
       channelId: channel.id, status: 'resolving', partsDone: 0, processingPart: null, clipsMade: 0, clipsQueued: 0, recording: null,
-      startedAt: new Date().toISOString(), endedAt: null, message: null
+      clipping: null, activity: [], startedAt: new Date().toISOString(), endedAt: null, message: null
     }
   }
 
@@ -103,6 +122,7 @@ export class LiveSession {
       return this.finish('error', 'Failed to start the live engine.')
     }
     this.child = child
+    this.log('Opening the stream')
     logger.info('live.session.start', { sessionId: this.sessionId, channelId: this.channel.id, platform: this.channel.platform, pid: child.pid })
     child.stdin?.on('error', () => { /* Close reports failures. */ })
     // stdin carries only the spec: a Python thread blocked reading a pipe can stall the engine on Windows.
@@ -134,6 +154,7 @@ export class LiveSession {
     if (!this.child) return
     if (this.stopping) { terminateProcessTree(this.child, true); return }
     this.stopping = true
+    this.log('Stopping: finishing and clipping the part being recorded')
     this.update({ status: 'stopping' })
     try {
       const sessionWork = join(workRoot(), `live-${this.sessionId}`)
@@ -164,13 +185,30 @@ export class LiveSession {
     } catch { return }
     switch (message.type) {
       case 'status':
-        if (message.status === 'recording' && !this.stopping) this.update({ status: 'recording' })
+        if (message.status === 'recording' && !this.stopping) {
+          if (this.state.status !== 'recording') this.log('Live found: recording started')
+          this.update({ status: 'recording' })
+        }
         break
       case 'progress': {
         const { part, recorded_s: seconds, part_s: target, gaps, ads } = message
         if (Number.isInteger(part) && (part as number) >= 1 && finite(seconds) && seconds >= 0 && finite(target) && target > 0 &&
             Number.isInteger(gaps) && (gaps as number) >= 0 && Number.isInteger(ads) && (ads as number) >= 0) {
-          this.update({ recording: { part: part as number, seconds, targetSeconds: target, gaps: gaps as number, ads: ads as number } })
+          const previous = this.state.recording
+          const adsNow = ads as number
+          const gapsNow = gaps as number
+          // One line per ad break (ads start rising again), not per skipped segment.
+          if (adsNow > (previous?.ads ?? 0) && !this.inAdBreak) {
+            this.inAdBreak = true
+            this.log('Twitch ad break: the stream is not sent during ads, so this time is skipped', 'warn')
+          } else if (adsNow === (previous?.ads ?? 0) && this.inAdBreak) {
+            this.inAdBreak = false
+            this.log('Ad break over: recording the stream again')
+          }
+          if (gapsNow > (previous?.gaps ?? 0)) {
+            this.log(`${gapsNow - (previous?.gaps ?? 0)} stream segment(s) could not be downloaded and were lost`, 'warn')
+          }
+          this.update({ recording: { part: part as number, seconds, targetSeconds: target, gaps: gapsNow, ads: adsNow } })
         }
         break
       }
@@ -181,7 +219,21 @@ export class LiveSession {
         this.openJobs.add(chunk.jobId)
         try { createRunRecord(this.outputDirectory, chunk.jobId, this.channel.url) }
         catch { logger.warn('live.history.writeFailed', { sessionId: this.sessionId }) }
-        this.update({ processingPart: chunk.part })
+        const duration = finite(message.duration_s) ? message.duration_s : null
+        const leadIn = finite(message.lead_in_s) ? message.lead_in_s : 0
+        this.log(`Part ${chunk.part} recorded${duration ? ` (${clock(duration - leadIn)}${leadIn ? `, plus ${clock(leadIn)} overlap` : ''})` : ''}: clipping it now`)
+        this.update({ processingPart: chunk.part, clipping: { part: chunk.part, step: 'Starting', percent: 0 } })
+        break
+      }
+      case 'chunk_progress': {
+        const step = safeStep(message.step)
+        const part = message.part
+        if (!step || !Number.isInteger(part) || part !== this.state.processingPart) break
+        // "Downloading" is the engine reading the local recording; completion is logged with the clips.
+        if (/^Downloading/i.test(step)) break
+        const percent = finite(message.percent) ? Math.min(100, Math.max(0, message.percent)) : this.state.clipping?.percent ?? 0
+        if (!/^(Processing complete|Clips saved)/i.test(step)) this.log(`Part ${part}: ${step.replace(/\.\.\.$/, '')}`)
+        this.update({ clipping: { part: part as number, step, percent } })
         break
       }
       case 'chunk_done': {
@@ -198,18 +250,26 @@ export class LiveSession {
             this.openJobs.delete(chunk.jobId)
             try { finishRunRecord(this.outputDirectory, chunk.jobId, 'failed', text) } catch { /* Best effort. */ }
           }
-          this.update({ partsDone: this.state.partsDone + 1, processingPart: null, message: text })
+          this.log(`Part ${chunk?.part ?? message.part ?? '?'}: ${text}`, 'warn')
+          this.update({ partsDone: this.state.partsDone + 1, processingPart: null, clipping: null, message: text })
         })
         break
       }
       case 'stream_ended':
-        this.enqueue(async () => this.update({ status: 'ended', message: message.reason === 'limit'
-          ? 'Stopped after 12 hours of recording.' : message.reason === 'offline' ? 'The channel is not live right now.' : null }))
+        this.enqueue(async () => {
+          this.log(message.reason === 'offline' ? 'The channel is not live right now' : message.reason === 'stopped'
+            ? 'Recording stopped' : message.reason === 'limit' ? 'Stopped after 12 hours of recording' : 'The stream ended')
+          this.update({ status: 'ended', message: message.reason === 'limit'
+            ? 'Stopped after 12 hours of recording.' : message.reason === 'offline' ? 'The channel is not live right now.' : null })
+        })
         break
       case 'error': {
         const text = safeText(message.message, 'Live recording failed.')
         const hint = message.hint ? safeText(message.hint, '') : ''
-        this.enqueue(async () => this.update({ status: 'error', message: hint ? `${text} ${hint}` : text }))
+        this.enqueue(async () => {
+          this.log(text, 'warn')
+          this.update({ status: 'error', message: hint ? `${text} ${hint}` : text })
+        })
         break
       }
     }
@@ -226,7 +286,8 @@ export class LiveSession {
     const runDirectory = join(this.outputDirectory, chunk.jobId)
     const output = await getJobOutput(runDirectory, this.outputDirectory)
     if (!output) {
-      this.update({ partsDone: this.state.partsDone + 1, processingPart: null, message: 'A clipped part could not be read from the library.' })
+      this.log(`Part ${chunk.part}: the clipped part could not be read from the library`, 'warn')
+      this.update({ partsDone: this.state.partsDone + 1, processingPart: null, clipping: null, message: 'A clipped part could not be read from the library.' })
       return
     }
     const kept = keptByChannel.get(this.channel.id) ?? []
@@ -247,10 +308,26 @@ export class LiveSession {
       keptByChannel.set(this.channel.id, selection.kept.slice(-200))
     }
     logger.info('live.chunk.done', { sessionId: this.sessionId, part: chunk.part, clips: output.clips.length, queued })
+    this.log(`Part ${chunk.part}: ${output.clips.length} clip${output.clips.length === 1 ? '' : 's'} made`, 'good')
+    const linked = Boolean(this.channel.automationId) && !message
+    for (const { clip, decision } of selection.decisions) {
+      const title = (clip.summary || `Clip ${clip.clip_index + 1}`).replace(/\s+/g, ' ').slice(0, 80)
+      this.log(`“${title}” · score ${Math.round(clip.virality_score * 100)} · ${DECISION_TEXT[decision](this.channel.minScore, linked)}`,
+        decision === 'kept' ? 'good' : 'info')
+    }
+    if (message) this.log(message, 'warn')
     this.update({
+      clipping: null,
       partsDone: this.state.partsDone + 1, processingPart: null, clipsMade: this.state.clipsMade + output.clips.length,
       clipsQueued: this.state.clipsQueued + queued, message
     })
+  }
+
+  private inAdBreak = false
+
+  /** Add a line to the session's activity log (published with the next update). */
+  private log(text: string, tone: LiveActivityTone = 'info'): void {
+    this.state.activity = [...this.state.activity, { at: new Date().toISOString(), text, tone }].slice(-MAX_LIVE_ACTIVITY)
   }
 
   private update(change: Partial<LiveSessionState>): void {
@@ -267,7 +344,8 @@ export class LiveSession {
       try { finishRunRecord(this.outputDirectory, jobId, 'failed', 'Live recording stopped before this part was clipped.') } catch { /* Best effort. */ }
     }
     this.openJobs.clear()
-    this.update({ status, message, processingPart: null, recording: null, endedAt: new Date().toISOString() })
+    if (status === 'error' && message && this.state.activity.at(-1)?.text !== message) this.log(message, 'warn')
+    this.update({ status, message, processingPart: null, recording: null, clipping: null, endedAt: new Date().toISOString() })
     this.onExit()
   }
 }

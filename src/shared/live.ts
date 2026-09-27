@@ -36,6 +36,17 @@ export type LiveChannelInput = Pick<LiveChannel, 'url' | 'enabled' | 'automation
 
 export type LiveSessionStatus = 'offline' | 'resolving' | 'recording' | 'stopping' | 'ended' | 'error'
 
+export type LiveActivityTone = 'info' | 'good' | 'warn'
+
+export interface LiveActivity {
+  at: string
+  text: string
+  tone: LiveActivityTone
+}
+
+/** Most recent events shown for a session. */
+export const MAX_LIVE_ACTIVITY = 80
+
 export interface LiveSessionState {
   channelId: string
   status: LiveSessionStatus
@@ -46,6 +57,10 @@ export interface LiveSessionState {
   clipsQueued: number
   /** The part being recorded now: new content so far, its target length, and what was skipped. */
   recording: { part: number; seconds: number; targetSeconds: number; gaps: number; ads: number } | null
+  /** The part being clipped now and the engine's current step. */
+  clipping: { part: number; step: string; percent: number } | null
+  /** What the session did, oldest first. */
+  activity: LiveActivity[]
   startedAt: string | null
   endedAt: string | null
   message: string | null
@@ -184,6 +199,7 @@ export function parseLiveChannelInput(value: unknown): LiveChannelInput & { plat
 
 export interface LiveClipCandidate {
   clip_index: number
+  summary?: string | null
   start_time_ms: number
   end_time_ms: number
   virality_score: number
@@ -192,22 +208,24 @@ export interface LiveClipCandidate {
 /** A clip already kept for posting, on the live stream's own timeline. */
 export interface KeptLiveClip { start: number; end: number; keptAt: number }
 
+export type LiveClipDecision = 'kept' | 'low_score' | 'duplicate' | 'hourly_limit'
+
 /**
  * Pick the clips of one chunk worth posting. Chunks overlap, so a moment can be
  * found twice: a clip that mostly overlaps one already kept is a duplicate.
+ * Every clip gets a decision, best score first, so the activity log can say why.
  */
 export function selectLiveClips(
   clips: readonly LiveClipCandidate[],
   chunk: { streamOffsetSeconds: number },
   kept: readonly KeptLiveClip[],
   options: { minScore: number; maxPostsPerHour: number; now: number }
-): { indices: number[]; kept: KeptLiveClip[] } {
+): { indices: number[]; kept: KeptLiveClip[]; decisions: { clip: LiveClipCandidate; decision: LiveClipDecision }[] } {
   const accepted = [...kept]
   const indices: number[] = []
+  const decisions: { clip: LiveClipCandidate; decision: LiveClipDecision }[] = []
   const recent = (): number => accepted.filter((item) => options.now - item.keptAt < 3_600_000).length
   for (const clip of [...clips].sort((a, b) => b.virality_score - a.virality_score)) {
-    if (!(clip.virality_score >= options.minScore)) continue
-    if (recent() >= options.maxPostsPerHour) break
     const start = chunk.streamOffsetSeconds + clip.start_time_ms / 1000
     const end = chunk.streamOffsetSeconds + clip.end_time_ms / 1000
     const length = Math.max(0.001, end - start)
@@ -215,9 +233,14 @@ export function selectLiveClips(
       const overlap = Math.min(end, item.end) - Math.max(start, item.start)
       return overlap > 0.5 * Math.min(length, Math.max(0.001, item.end - item.start))
     })
-    if (duplicate) continue
+    let decision: LiveClipDecision = 'kept'
+    if (!(clip.virality_score >= options.minScore)) decision = 'low_score'
+    else if (duplicate) decision = 'duplicate'
+    else if (recent() >= options.maxPostsPerHour) decision = 'hourly_limit'
+    decisions.push({ clip, decision })
+    if (decision !== 'kept') continue
     accepted.push({ start, end, keptAt: options.now })
     indices.push(clip.clip_index)
   }
-  return { indices, kept: accepted }
+  return { indices, kept: accepted, decisions }
 }

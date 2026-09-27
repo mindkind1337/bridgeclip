@@ -139,6 +139,20 @@ class LiveRunnerTests(unittest.TestCase):
         self.assertEqual(self.settings_env, {"PLANNER_MODEL": "z-ai/glm-5.3-flash",
                                              "LOCAL_OUTPUT_DIR": os.path.abspath(self.tmp.name)})
 
+    def test_each_new_pipeline_step_is_reported_once(self):
+        output = io.StringIO()
+        report = live.chunk_progress_reporter()
+        step = lambda text, pct: types.SimpleNamespace(status=types.SimpleNamespace(value="rendering"), current_step=text,
+                                                       progress_percent=pct, clips_completed=0, total_clips=2)
+        with redirect_stdout(output):
+            live._clipping_part.update(part=None, step=None)
+            report(step("ignored: no part", 1))
+            live._clipping_part.update(part=3, step=None)
+            for text, pct in (("Transcribing audio...", 15), ("Transcribing audio...", 16), ("Rendered 1 of 2 clips", 70)):
+                report(step(text, pct))
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([(m["part"], m["step"], m["percent"]) for m in lines], [(3, "Transcribing audio...", 15), (3, "Rendered 1 of 2 clips", 70)])
+
     def test_a_failed_chunk_does_not_stop_the_session(self):
         self.fail_parts = {1}
         ok, messages = self.run_spec(self.spec(), self.modules(chunks=2))
