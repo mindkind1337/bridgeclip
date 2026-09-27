@@ -15,6 +15,10 @@ export function ClipPlayerDialog({ filePath, title, vertical, onClose }: {
   const titleId = useId()
   const panel = useRef<HTMLDivElement>(null)
   const [failed, setFailed] = useState(false)
+  // A read can fail for a moment (file busy, seek aborted): reload a few times and resume where it stopped.
+  const video = useRef<HTMLVideoElement>(null)
+  const retries = useRef(0)
+  const resumeAt = useRef(0)
   // The parent passes a new onClose each render; focus is taken and restored once.
   const close = useRef(onClose)
   close.current = onClose
@@ -29,6 +33,25 @@ export function ClipPlayerDialog({ filePath, title, vertical, onClose }: {
       previous?.focus?.()
     }
   }, [])
+
+  const onError = (): void => {
+    const element = video.current
+    if (!element || retries.current >= 3) {
+      setFailed(true)
+      return
+    }
+    retries.current += 1
+    resumeAt.current = element.currentTime
+    element.load()
+  }
+
+  const onLoadedMetadata = (): void => {
+    const element = video.current
+    if (!element || resumeAt.current <= 0) return
+    element.currentTime = resumeAt.current
+    resumeAt.current = 0
+    void element.play().catch(() => {})
+  }
 
   const openExternally = (): void => {
     void getApi().shell.openPath(filePath).catch(() => {})
@@ -47,6 +70,7 @@ export function ClipPlayerDialog({ filePath, title, vertical, onClose }: {
           </p>
         ) : (
           <video
+            ref={video}
             src={localFileUrl(filePath)}
             controls
             autoPlay
@@ -54,7 +78,8 @@ export function ClipPlayerDialog({ filePath, title, vertical, onClose }: {
             preload="auto"
             className="mx-auto max-h-[70vh] w-full bg-black"
             aria-label={`Play “${title}”`}
-            onError={() => setFailed(true)}
+            onError={onError}
+            onLoadedMetadata={onLoadedMetadata}
           />
         )}
       </div>

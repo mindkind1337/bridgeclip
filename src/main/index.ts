@@ -211,8 +211,9 @@ app.whenReady().then(() => {
       }
       const stream = media.handle.createReadStream({ start, end, autoClose: true })
       return new Response(Readable.toWeb(stream) as ReadableStream<Uint8Array>, { status, headers })
-    } catch {
+    } catch (error) {
       await media?.handle.close().catch(() => {})
+      logger.warn('media.unavailable', errorSummary(error))
       return new Response('Media unavailable', { status: 403 })
     }
   })
