@@ -2,6 +2,7 @@ import { ChevronRight, Film, Layers, PanelLeftClose, PanelLeftOpen, Radio, Send,
 import { cn, MOD_KEY, sourceLabel } from '../lib/utils'
 import { useIsWide, useSidebarExpanded, useSidebarStore } from '../store/use-sidebar-store'
 import { useActiveJobs } from '../store/use-job-store'
+import { useRecordings } from '../store/use-live-store'
 import { useSetupState } from '../store/use-settings-store'
 import { APP_VERSION } from '../config/brand'
 import { BridgeClipLogo } from './brand/BridgeClipLogo'
@@ -74,6 +75,7 @@ export function Sidebar({ currentPage, onNavigate }: SidebarProps): React.JSX.El
       </nav>
 
       <div className={cn('mt-auto space-y-1.5', expanded ? 'p-2.5' : 'p-2')}>
+        {currentPage !== 'live' && <LiveRecordingsCard expanded={expanded} onOpen={() => onNavigate('live')} />}
         {currentPage !== 'jobs' && <ActiveJobsCard expanded={expanded} onOpen={() => onNavigate('jobs')} />}
         <SidebarUpdateButton expanded={expanded} />
         <div className={cn('flex items-center gap-1', !expanded && 'justify-center')}>
@@ -140,7 +142,10 @@ function NavButton({ item, expanded, active, onNavigate }: {
 }): React.JSX.Element {
   const Icon = item.icon
   const liveJobs = useActiveJobs().length
-  const badge = item.id === 'jobs' && liveJobs > 0 ? liveJobs : null
+  const recordings = useRecordings().length
+  const count = item.id === 'jobs' ? liveJobs : item.id === 'live' ? recordings : 0
+  const badge = count > 0 ? count : null
+  const recordingBadge = item.id === 'live' 
   return (
     <button
       onClick={() => onNavigate(item.id)}
@@ -163,19 +168,64 @@ function NavButton({ item, expanded, active, onNavigate }: {
         strokeWidth={active ? 2.2 : 1.9}
       />
       {!expanded && badge && (
-        <span aria-hidden className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_0_2px_rgb(var(--canvas))]" />
+        <span aria-hidden className={cn('absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full shadow-[0_0_0_2px_rgb(var(--canvas))]',
+          recordingBadge ? 'animate-pulse bg-danger' : 'bg-accent')} />
       )}
       {expanded && (
         <>
           <span className="flex-1 truncate text-left">{item.label}</span>
-          {badge && (
+          {badge && (recordingBadge ? (
+            <span aria-hidden className="flex items-center gap-1 rounded-full bg-danger/15 px-1.5 font-mono text-2xs tabular text-danger group-hover:hidden">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-danger" />{badge}
+            </span>
+          ) : (
             <span aria-hidden className="rounded-full bg-accent/20 px-1.5 font-mono text-2xs tabular text-accent-hover group-hover:hidden">{badge}</span>
-          )}
+          ))}
           <kbd className="font-sans text-2xs text-ink-faint opacity-0 transition-opacity group-hover:opacity-100">
             {MOD_KEY}
             {item.shortcut}
           </kbd>
         </>
+      )}
+    </button>
+  )
+}
+
+function minutes(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
+/** Live recordings at a glance, on every page: which channel, and the part being recorded or clipped. */
+function LiveRecordingsCard({ expanded, onOpen }: { expanded: boolean; onOpen: () => void }): React.JSX.Element | null {
+  const recordings = useRecordings()
+  if (recordings.length === 0) return null
+  const single = recordings.length === 1 ? recordings[0] : null
+  const title = single ? single.channel.displayName : `${recordings.length} lives recording`
+  const detail = single
+    ? single.state.clipping?.step
+      ? `Clipping part ${single.state.clipping.part}`
+      : single.state.recording
+        ? `Part ${single.state.recording.part} · ${minutes(single.state.recording.seconds)} / ${minutes(single.state.recording.targetSeconds)}`
+        : single.state.status === 'stopping' ? 'Finishing last part' : 'Opening stream'
+    : recordings.map((item) => item.channel.displayName).join(', ')
+  return (
+    <button
+      onClick={onOpen}
+      aria-label={`Recording: ${title}. ${detail}. Open Live`}
+      title={expanded ? undefined : `Recording · ${title} · ${detail}`}
+      className={cn('flex w-full items-center gap-2 rounded-xl bg-danger/[0.08] text-left shadow-[inset_0_0_0_1px_rgb(var(--danger)/0.22)] transition-colors hover:bg-danger/[0.13]',
+        expanded ? 'px-2.5 py-2' : 'h-9 justify-center')}
+    >
+      <span aria-hidden className="relative flex h-2 w-2 shrink-0">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-danger opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-danger" />
+      </span>
+      {expanded && (
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-medium text-ink">{title}</span>
+          <span className="block truncate text-2xs text-ink-muted">{detail}</span>
+        </span>
       )}
     </button>
   )

@@ -14,6 +14,7 @@ import { useSettingsStore } from './store/use-settings-store'
 import { useJobStore } from './store/use-job-store'
 import { useSidebarStore } from './store/use-sidebar-store'
 import { useUpdateStore } from './store/use-update-store'
+import { useLiveStore } from './store/use-live-store'
 import { Button } from './components/ui/Button'
 import { getApi } from './lib/ipc'
 
@@ -39,6 +40,15 @@ export default function App(): React.JSX.Element {
     const api = getApi()
     const unsubscribe = api.job.onUpdate((job) => useJobStore.getState().upsert(job))
     void api.job.list().then((jobs) => useJobStore.getState().hydrate(jobs)).catch(() => {})
+    return unsubscribe
+  }, [])
+
+  // Live recordings run in the main process whatever page is open. Subscribe
+  // first, then load, so the sidebar shows a recording as soon as the app opens.
+  useEffect(() => {
+    const api = getApi()
+    const unsubscribe = api.live.onUpdate((overview) => useLiveStore.getState().set(overview))
+    void api.live.overview().then((overview) => useLiveStore.getState().set(overview)).catch(() => {})
     return unsubscribe
   }, [])
 

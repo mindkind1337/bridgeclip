@@ -21,6 +21,7 @@ import { Select } from '../components/ui/Select'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Switch } from '../components/ui/Switch'
 import { useSettingsStore } from '../store/use-settings-store'
+import { isRecordingState, useLiveStore } from '../store/use-live-store'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatRelativeDate } from '../lib/utils'
 import type { Page as PageName } from '../components/Sidebar'
@@ -54,14 +55,13 @@ function clock(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
-function isRunning(state: LiveSessionState | undefined): boolean {
-  return Boolean(state && ['resolving', 'recording', 'stopping'].includes(state.status))
-}
+const isRunning = isRecordingState
 
 export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void }): React.JSX.Element {
   const openrouterConfigured = useSettingsStore((state) => state.openrouterConfigured)
   const zernioConfigured = useSettingsStore((state) => state.zernioConfigured)
-  const [overview, setOverview] = useState<LiveOverview | null>(null)
+  const overview = useLiveStore((store) => store.overview)
+  const setOverview = useLiveStore((store) => store.set)
   const [automations, setAutomations] = useState<Automation[]>([])
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState<string | null>(null)
@@ -70,12 +70,10 @@ export function LivePage({ onNavigate }: { onNavigate: (page: PageName) => void 
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null)
   const closeConfirm = useCallback(() => setConfirm(null), [])
 
+  // App keeps the overview current; refresh once here to surface a load error.
   useEffect(() => {
-    const api = getApi()
-    const unsubscribe = api.live.onUpdate(setOverview)
-    void api.live.overview().then(setOverview).catch((cause) => setError(errorMessage(cause, 'Could not load live channels.')))
-    return unsubscribe
-  }, [])
+    void getApi().live.overview().then(setOverview).catch((cause) => setError(errorMessage(cause, 'Could not load live channels.')))
+  }, [setOverview])
 
   useEffect(() => {
     if (!zernioConfigured) return
