@@ -395,3 +395,31 @@ def test_youtube_replay_is_the_watch_url_of_the_broadcast():
     stream = LiveStream('u', 't', 'c', 'youtube', 720, broadcast_id='HvZt-nh9sGg')
     assert module.resolve_replay(channel, stream) == 'https://www.youtube.com/watch?v=HvZt-nh9sGg'
     assert module.resolve_replay(channel, LiveStream('u', 't', 'c', 'youtube', 720, broadcast_id='bad id')) is None
+
+
+class FlakyStream(FakeStream):
+    """The playlist times out a few times in a row, then recovers."""
+
+    def __init__(self, total, failures, **kwargs):
+        super().__init__(total, **kwargs)
+        self.failures = failures
+
+    def fetch(self, url, max_bytes):
+        if url.endswith('.m3u8') and self.playlist_fetches == 2 and self.failures:
+            self.failures -= 1
+            raise TimeoutError('connect timed out')
+        return super().fetch(url, max_bytes)
+
+
+def test_network_errors_on_the_playlist_are_retried(tmp_path):
+    capture, reason, chunks, resolves = run_capture(tmp_path, FlakyStream(50, failures=6), chunk_seconds=60, overlap_seconds=0)
+    assert reason == 'ended'
+    assert capture.network_errors == 6
+    assert len(resolves) == 2, 'the stream is looked up again after five failures in a row'
+    assert sum(c.duration_seconds for c, _ in chunks) == 100
+
+
+def test_a_stream_that_stays_unreachable_ends_with_an_error(tmp_path):
+    with pytest.raises(LiveCaptureError) as error:
+        run_capture(tmp_path, FlakyStream(50, failures=100), chunk_seconds=60, overlap_seconds=0)
+    assert error.value.reason == 'network'

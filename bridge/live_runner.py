@@ -41,6 +41,8 @@ LIVE_ERRORS = {
     "unsupported_stream": ("This live stream uses a format BridgeClip cannot record yet.", None),
     "resolve_failed": ("The live stream could not be opened.",
                        "Check that the stream plays while signed out, then retry."),
+    "network": ("The live stream stopped responding for several minutes.",
+                "Check your connection. BridgeClip tries again automatically if the channel is still live."),
 }
 
 

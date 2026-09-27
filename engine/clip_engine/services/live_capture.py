@@ -32,6 +32,9 @@ REQUEST_TIMEOUT_SECONDS = 20
 SEGMENT_ATTEMPTS = 3
 REMUX_TIMEOUT_SECONDS = 10 * 60
 MAX_WAITING_SEGMENTS = 60
+# Network errors reading the playlist are retried with a growing pause; after this
+# many in a row the stream is looked up again, and after twice as many recording stops.
+NETWORK_RETRIES_BEFORE_RESOLVE = 5
 MAX_INIT_BYTES = 1024 * 1024
 MAX_INIT_SEGMENTS = 16
 
@@ -421,6 +424,7 @@ class HlsCapture:
         self.content_seconds = 0.0
         self.gaps = 0
         self.skipped_ads = 0
+        self.network_errors = 0
         self.current: list[Recorded] = []
         self.lead_in: list[Recorded] = []
         # Init segment URI -> local copy, for fragmented MP4 streams.
@@ -437,6 +441,7 @@ class HlsCapture:
         last_sequence: Optional[int] = None
         waiting: dict[int, Segment] = {}
         misses = 0
+        network_errors = 0
         try:
             while True:
                 if self.stop_event.is_set():
@@ -461,7 +466,28 @@ class HlsCapture:
                     self.stream = stream
                     misses = 0
                     continue
+                except LiveCaptureError:
+                    raise
+                except Exception as error:
+                    # A timeout or dropped connection must not end the recording.
+                    network_errors += 1
+                    self.network_errors += 1
+                    logger.warning("Live playlist unreachable (%s), attempt %d; retrying", type(error).__name__, network_errors)
+                    if network_errors >= 2 * NETWORK_RETRIES_BEFORE_RESOLVE:
+                        raise LiveCaptureError("The live stream could not be reached", "network") from error
+                    if network_errors % NETWORK_RETRIES_BEFORE_RESOLVE == 0:
+                        try:
+                            stream = self.resolve(self.channel)
+                        except Exception:
+                            stream = self.stream
+                        if stream is None:
+                            self._flush(final=True)
+                            return "ended"
+                        self.stream = stream
+                    self.stop_event.wait(min(2.0 * network_errors, 15.0))
+                    continue
                 misses = 0
+                network_errors = 0
                 # Segments already seen but not recorded yet wait here: the video
                 # playlist slides on while a lagging audio playlist catches up.
                 seen = max([last_sequence if last_sequence is not None else -1, *waiting])
