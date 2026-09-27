@@ -616,3 +616,21 @@ test('a clip cut by the end of a part is left for the next part, except in the l
   assert.equal(liveOverlapSeconds(['short', 'long'], 10), 299)
   assert.equal(liveOverlapSeconds(['long'], 5), 149)
 })
+
+test('the chat chart of a whole live starts at its first message and stays readable', () => {
+  const { chatActivity, clipChatReaction } = shared()
+  // Three hours into the stream, two hours of chat, a burst of laughs at 3:30:00.
+  const start = 3 * 3600
+  const messages = []
+  for (let t = start; t < start + 7200; t += 20) messages.push({ t, text: 'hi' })
+  for (let i = 0; i < 60; i++) messages.push({ t: start + 1800 + i * 0.5, text: 'KEKW' })
+  const activity = chatActivity(messages, 10, start, 150)
+  assert.equal(activity.origin, start)
+  assert.ok(activity.counts.length <= 150, 'the chart is widened to fit')
+  assert.equal(activity.window % 10, 0)
+  const spike = activity.spikes.findIndex(Boolean)
+  assert.equal(activity.origin + spike * activity.window <= start + 1800, true)
+  assert.equal(activity.topReaction[spike], 'KEKW')
+  const reaction = clipChatReaction(activity, start + 1790, start + 1820)
+  assert.ok(reaction && reaction.reaction === 'KEKW' && reaction.at >= start)
+})

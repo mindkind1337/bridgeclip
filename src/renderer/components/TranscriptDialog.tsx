@@ -90,7 +90,14 @@ export function TranscriptDialog({ outputDir, output, onClose, initialScope = 'p
   const needle = query.trim().toLowerCase()
   const lines = useMemo(() => (shown?.lines ?? []).filter((line) => !needle || line.text.toLowerCase().includes(needle)), [shown, needle])
   const messages = useMemo(() => (shown?.chat?.messages ?? []).filter((item) => !needle || item.text.toLowerCase().includes(needle)), [shown, needle])
-  const chat = useMemo(() => chatActivity(shown?.chat?.messages ?? [], CHAT_WINDOW_SECONDS), [shown])
+  // A whole live starts hours into its stream and runs for hours: start the chart at the first
+  // message, and widen its bars to keep it readable (at most 150).
+  const chat = useMemo(() => {
+    const all = shown?.chat?.messages ?? []
+    const origin = scope === 'live' && all.length ? Math.floor(Math.min(...all.map((item) => item.t)) / CHAT_WINDOW_SECONDS) * CHAT_WINDOW_SECONDS : 0
+    return chatActivity(all, CHAT_WINDOW_SECONDS, origin, 150)
+  }, [shown, scope])
+  const barSeconds = chat?.window ?? CHAT_WINDOW_SECONDS
   const activity = chat?.counts ?? []
   const peak = Math.max(1, ...activity)
   // Clips whose moment made the chat spike (during the clip or just after: chat lags).
@@ -180,14 +187,14 @@ export function TranscriptDialog({ outputDir, output, onClose, initialScope = 'p
             {activity.length > 0 && (
               <div className="mb-3">
                 <p className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-2xs text-ink-muted">
-                  <span className="flex items-center gap-1.5"><MessageSquare className="h-3 w-3" />Messages per {CHAT_WINDOW_SECONDS} s · click a bar to read that moment</span>
+                  <span className="flex items-center gap-1.5"><MessageSquare className="h-3 w-3" />Messages per {barSeconds >= 60 && barSeconds % 60 === 0 ? `${barSeconds / 60} min` : `${barSeconds} s`} · click a bar to read that moment</span>
                   <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-warning" />chat spike</span>
                   {scope === 'part' && clips.length > 0 && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-accent" />in a clip</span>}
                 </p>
                 <div className="flex h-16 items-end gap-px" role="group" aria-label="Chat activity over the part">
                   {activity.map((count, index) => {
-                    const start = index * CHAT_WINDOW_SECONDS
-                    const clip = clipAt(start, start + CHAT_WINDOW_SECONDS)
+                    const start = (chat?.origin ?? 0) + index * barSeconds
+                    const clip = clipAt(start, start + barSeconds)
                     const spike = chat?.spikes[index]
                     const reaction = chat?.topReaction[index]
                     const label = `${clock(start)} · ${count} messages${spike ? ` · spike ×${(count / (chat?.usual ?? 1)).toFixed(1)}` : ''}${reaction ? ` · ${reaction}` : ''}${clip ? ` · Clip ${clip}` : ''}`

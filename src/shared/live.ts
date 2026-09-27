@@ -456,6 +456,9 @@ export const CHAT_WINDOW_SECONDS = 10
 export const CHAT_REACTION_LAG_SECONDS = 20
 
 export interface ChatActivity {
+  /** Time of the first window, and each window's length (seconds). */
+  origin: number
+  window: number
   /** Messages per window, and the usual (median) count. */
   counts: number[]
   usual: number
@@ -464,13 +467,21 @@ export interface ChatActivity {
   topReaction: (string | null)[]
 }
 
-export function chatActivity(messages: readonly { t: number; text: string }[], window = CHAT_WINDOW_SECONDS): ChatActivity | null {
+/**
+ * Messages per window. `origin` is where the first window starts (a whole
+ * live starts hours into its stream); pass `maxWindows` to widen windows so a
+ * long live still fits in a readable chart.
+ */
+export function chatActivity(messages: readonly { t: number; text: string }[], window = CHAT_WINDOW_SECONDS,
+  origin = 0, maxWindows?: number): ChatActivity | null {
   if (!messages.length) return null
-  const length = Math.floor(Math.max(...messages.map((message) => message.t)) / window) + 1
+  const last = Math.max(...messages.map((message) => message.t))
+  if (maxWindows && (last - origin) / window > maxWindows) window = Math.ceil((last - origin) / maxWindows / 10) * 10
+  const length = Math.floor((last - origin) / window) + 1
   const counts = Array.from({ length }, () => 0)
   const reactions = Array.from({ length }, () => new Map<string, number>())
   for (const message of messages) {
-    const index = Math.max(0, Math.floor(message.t / window))
+    const index = Math.min(length - 1, Math.max(0, Math.floor((message.t - origin) / window)))
     counts[index] += 1
     const seen = new Set<string>()
     for (const token of message.text.match(/[\p{L}\p{N}']+|[^\p{L}\p{N}\s]/gu) ?? []) {
@@ -485,22 +496,23 @@ export function chatActivity(messages: readonly { t: number; text: string }[], w
   const sorted = [...counts].sort((a, b) => a - b)
   const usual = Math.max(1, sorted[Math.floor(sorted.length / 2)])
   return {
-    counts, usual,
+    origin, window, counts, usual,
     spikes: counts.map((count) => count >= Math.max(3, 2 * usual)),
     topReaction: reactions.map((map) => [...map.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null)
   }
 }
 
 /** The strongest chat reaction during a clip or right after it (chat lags the moment), if the chat spiked. */
-export function clipChatReaction(activity: ChatActivity | null, start: number, end: number,
-  window = CHAT_WINDOW_SECONDS): { at: number; count: number; ratio: number; reaction: string | null } | null {
+export function clipChatReaction(activity: ChatActivity | null, start: number,
+  end: number): { at: number; count: number; ratio: number; reaction: string | null } | null {
   if (!activity) return null
+  const { origin, window } = activity
   let best: number | null = null
-  const first = Math.max(0, Math.floor(start / window))
-  const last = Math.min(activity.counts.length - 1, Math.floor((end + CHAT_REACTION_LAG_SECONDS) / window))
+  const first = Math.max(0, Math.floor((start - origin) / window))
+  const last = Math.min(activity.counts.length - 1, Math.floor((end + CHAT_REACTION_LAG_SECONDS - origin) / window))
   for (let index = first; index <= last; index++) {
     if (activity.spikes[index] && (best === null || activity.counts[index] > activity.counts[best])) best = index
   }
   if (best === null) return null
-  return { at: best * window, count: activity.counts[best], ratio: activity.counts[best] / activity.usual, reaction: activity.topReaction[best] }
+  return { at: origin + best * window, count: activity.counts[best], ratio: activity.counts[best] / activity.usual, reaction: activity.topReaction[best] }
 }
