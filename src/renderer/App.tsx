@@ -9,6 +9,7 @@ import { AccountsPage } from './pages/AccountsPage'
 import { PostsPage } from './pages/PostsPage'
 import { AutomationsPage } from './pages/AutomationsPage'
 import { LivePage } from './pages/LivePage'
+import { PageErrorBoundary } from './components/PageErrorBoundary'
 import { BridgeClipLogo } from './components/brand/BridgeClipLogo'
 import { useSettingsStore } from './store/use-settings-store'
 import { useJobStore } from './store/use-job-store'
@@ -98,6 +99,7 @@ export default function App(): React.JSX.Element {
     <>
       {settingsLoaded ? (
         <Layout currentPage={page} onNavigate={setPage}>
+          <PageErrorBoundary resetKey={page}>
           {page === 'clip' && <ClipPage onNavigate={setPage} />}
           {page === 'library' && <LibraryPage onNavigate={setPage} />}
           {page === 'jobs' && <JobsPage onNavigate={setPage} />}
@@ -106,6 +108,7 @@ export default function App(): React.JSX.Element {
           {page === 'automations' && <AutomationsPage onNavigate={setPage} />}
           {page === 'live' && <LivePage onNavigate={setPage} />}
           {page === 'settings' && <SettingsPage showUpdates={showUpdates} />}
+          </PageErrorBoundary>
         </Layout>
       ) : (
         <div className="app-backdrop drag flex h-screen items-center justify-center">
