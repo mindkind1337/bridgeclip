@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { randomUUID } from 'crypto'
+import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { BRIDGE_CONTRACT_VERSION } from '../../shared/job-contract'
 import { LIVE_OVERLAP_SECONDS, selectLiveClips, type KeptLiveClip, type LiveChannel, type LiveSessionState } from '../../shared/live'
@@ -102,7 +103,8 @@ export class LiveSession {
     this.child = child
     logger.info('live.session.start', { sessionId: this.sessionId, channelId: this.channel.id, platform: this.channel.platform, pid: child.pid })
     child.stdin?.on('error', () => { /* Close reports failures. */ })
-    child.stdin?.write(`${spec}\n`)
+    // stdin carries only the spec: a Python thread blocked reading a pipe can stall the engine on Windows.
+    child.stdin?.end(`${spec}\n`)
     const engineLog = openDevEngineLog(`live-${this.sessionId}`)
     child.stderr?.on('data', (data: Buffer) => engineLog.write(data))
     if (child.stdout) {
@@ -131,7 +133,15 @@ export class LiveSession {
     if (this.stopping) { terminateProcessTree(this.child, true); return }
     this.stopping = true
     this.update({ status: 'stopping' })
-    this.child.stdin?.end('stop\n')
+    try {
+      const sessionWork = join(workRoot(), `live-${this.sessionId}`)
+      mkdirSync(sessionWork, { recursive: true, mode: 0o700 })
+      writeFileSync(join(sessionWork, 'stop'), '', { mode: 0o600 })
+    } catch {
+      // Without the stop file the engine cannot finish cleanly; end it now.
+      terminateProcessTree(this.child, true)
+      return
+    }
     const child = this.child
     setTimeout(() => { if (this.child === child) terminateProcessTree(child, true) }, FORCE_STOP_MS).unref()
   }

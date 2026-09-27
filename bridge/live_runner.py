@@ -7,8 +7,10 @@ Long-running bridge for live streams. The first stdin line is a JSON spec:
 - ``{"mode": "probe", "channels": [...]}`` reports which channels are live now
   and exits.
 - ``{"mode": "record", ...}`` records one channel's live stream in chunks and
-  clips each chunk with the normal pipeline until the stream ends. Writing
-  ``stop`` on stdin (or closing it) finishes the current chunk and exits.
+  clips each chunk with the normal pipeline until the stream ends. Creating a
+  file named ``stop`` in the session's work folder finishes the current chunk
+  and exits. (A thread blocked reading stdin can stall the whole process on
+  Windows, so stdin carries only the spec.)
 
 JSON lines on stdout use the same protocol stream as bridge_runner.
 """
@@ -89,12 +91,14 @@ def probe(spec: dict) -> bool:
     return True
 
 
-def watch_stdin(stop: threading.Event) -> None:
-    """Stop gracefully on a "stop" line or when Electron closes stdin."""
-    for line in sys.stdin:
-        if line.strip() == "stop":
-            break
-    stop.set()
+STOP_FILE = "stop"
+
+
+def watch_stop_file(path: str, stop: threading.Event, interval: float = 1.0) -> None:
+    """Stop gracefully once Electron creates the stop file."""
+    while not stop.wait(interval):
+        if os.path.exists(path):
+            stop.set()
 
 
 async def record(spec: dict) -> bool:
@@ -119,7 +123,9 @@ async def record(spec: dict) -> bool:
     os.makedirs(work_dir, mode=0o700, exist_ok=True)
 
     chunks: "queue.Queue" = queue.Queue()
-    stop = spec.get("_stop_event") or threading.Event()
+    stop = threading.Event()
+    threading.Thread(target=watch_stop_file, args=(os.path.join(work_dir, STOP_FILE), stop, spec.get("_stop_poll", 1.0)),
+                     name="live-stop", daemon=True).start()
     outcome: dict = {}
 
     def capture_main() -> None:
@@ -247,10 +253,6 @@ def main() -> int:
     except (ValueError, TypeError):
         bridge.emit({"type": "error", "message": "Invalid live configuration."})
         return 1
-    if spec["mode"] == "record":
-        stop = threading.Event()
-        spec["_stop_event"] = stop
-        threading.Thread(target=watch_stdin, args=(stop,), name="live-stdin", daemon=True).start()
     try:
         return 0 if asyncio.run(run(spec)) else 1
     except KeyboardInterrupt:

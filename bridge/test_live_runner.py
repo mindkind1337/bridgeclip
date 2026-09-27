@@ -191,10 +191,14 @@ class LiveRunnerTests(unittest.TestCase):
             with self.subTest(spec=spec), self.assertRaises(ValueError):
                 live.validate_spec(spec)
 
-    def test_stop_line_sets_the_stop_event(self):
+    def test_stop_file_sets_the_stop_event(self):
         stop = threading.Event()
-        with patch.object(sys, "stdin", io.StringIO("noise\nstop\n")):
-            live.watch_stdin(stop)
+        path = os.path.join(self.tmp.name, "stop")
+        watcher = threading.Thread(target=live.watch_stop_file, args=(path, stop, 0.01))
+        watcher.start()
+        self.assertFalse(stop.wait(0.05))
+        open(path, "w").close()
+        watcher.join(2)
         self.assertTrue(stop.is_set())
 
     def test_main_rejects_malformed_input(self):
