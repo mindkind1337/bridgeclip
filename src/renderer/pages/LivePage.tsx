@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, ListTree, MonitorPlay, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
+import { ChevronDown, ExternalLink, Film, ListTree, MonitorPlay, Play, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
 import {
-  DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, type LiveActivity, type LiveChannel, type LiveChannelInput,
+  DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, streamClock, type LiveActivity, type LiveChannel, type LiveChannelClip, type LiveChannelInput,
   type LiveClipSettings, type LiveOverview, type LiveSessionState
 } from '../../shared/live'
 import type { Automation } from '../../shared/automations'
 import { DURATION_OPTIONS } from '../../shared/job-contract'
 import { CAPTION_PRESET_NAMES } from '../components/CaptionPresetPicker'
+import { ClipPlayerDialog } from '../components/ClipPlayerDialog'
 import { Badge, StatusDot } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Callout } from '../components/ui/Callout'
@@ -220,7 +221,8 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
           <p className="mt-0.5 flex flex-wrap gap-x-1.5 text-2xs text-ink-muted">
             {state && (running || state.partsDone > 0) ? (
               <>
-                <span><span className="tabular text-ink">{state.partsDone}</span> part{state.partsDone === 1 ? '' : 's'} clipped</span>
+                <span title="Since this recording started (it restarts with the app); the clip list below counts the whole live">
+                  This recording: <span className="tabular text-ink">{state.partsDone}</span> part{state.partsDone === 1 ? '' : 's'} clipped</span>
                 <span>· <span className="tabular text-ink">{state.clipsMade}</span> clips</span>
                 <span>· <span className="tabular text-ink">{state.clipsQueued}</span> queued</span>
               </>
@@ -295,10 +297,72 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
         </div>
       </div>
       {/* Older main processes (before a restart) send states without these fields. */}
+      <ChannelClips channel={channel} refreshKey={`${state?.partsDone ?? 0}-${state?.status ?? 'none'}`} />
       {(state?.activity?.length ?? 0) > 0 && <ActivityLog entries={state!.activity} live={running} />}
       {expanded && <ChannelSettings channel={channel} automations={automations} saving={busy === `save:${channel.id}`} onSave={onSave} onRemove={onRemove} />}
     </Panel>
     </section>
+  )
+}
+
+/**
+ * Clips of this channel's current live (or today), read from the library so they
+ * survive restarts: play them here, or open the replay at their moment.
+ */
+function ChannelClips({ channel, refreshKey }: { channel: LiveChannel; refreshKey: string }): React.JSX.Element | null {
+  const [data, setData] = useState<{ clips: LiveChannelClip[]; parts: number } | null>(null)
+  const [all, setAll] = useState(false)
+  const [playing, setPlaying] = useState<LiveChannelClip | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const load = (): void => { void getApi().live.channelClips(channel.id).then((result) => { if (active) setData(result) }).catch(() => {}) }
+    load()
+    const timer = setInterval(load, 60_000)
+    return () => { active = false; clearInterval(timer) }
+  }, [channel.id, refreshKey])
+
+  if (!data || data.clips.length === 0) return null
+  const shown = all ? data.clips : data.clips.slice(0, 4)
+  return (
+    <div className="border-t border-white/[0.06] px-3.5 py-2">
+      <div className="mb-1 flex items-center justify-between">
+        <p className="flex items-center gap-1.5 text-2xs font-medium text-ink-muted">
+          <Film aria-hidden className="h-3 w-3" />
+          {data.clips.length} clip{data.clips.length === 1 ? '' : 's'} from this live · {data.parts} part{data.parts === 1 ? '' : 's'}
+        </p>
+        {data.clips.length > 4 && (
+          <button type="button" className="text-2xs text-ink-subtle hover:text-ink" onClick={() => setAll(!all)}>
+            {all ? 'Show less' : `Show all ${data.clips.length}`}
+          </button>
+        )}
+      </div>
+      <ul className="space-y-0.5">
+        {shown.map((clip) => (
+          <li key={`${clip.runDir}-${clip.clipIndex}`} className="flex items-center gap-2 text-2xs">
+            <button type="button" onClick={() => setPlaying(clip)} aria-label={`Play “${clip.title}”`} title="Play here"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/[0.06] text-ink-muted hover:bg-accent/20 hover:text-ink">
+              <Play className="ml-px h-3 w-3" fill="currentColor" />
+            </button>
+            <span className="min-w-0 flex-1 truncate text-ink" title={clip.title}>{clip.title}</span>
+            <span className="shrink-0 font-mono tabular text-ink-subtle" title="Score">{Math.round(clip.score * 100)}</span>
+            <span className="w-24 shrink-0 text-right text-ink-subtle">
+              {clip.intoStream !== null ? `${streamClock(clip.intoStream)} in live` : `part ${clip.part}`}
+            </span>
+            {clip.hasReplay ? (
+              <button type="button" aria-label={`Watch “${clip.title}” in the replay`} title="Open the replay at this moment"
+                className="shrink-0 text-ink-subtle hover:text-accent-hover"
+                onClick={() => { setError(null); void getApi().live.openReplay(clip.runDir, clip.startSeconds).catch((cause) => setError(errorMessage(cause, 'Could not open the replay.'))) }}>
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+            ) : <span className="w-3.5 shrink-0" />}
+          </li>
+        ))}
+      </ul>
+      {error && <p role="alert" className="mt-1 text-2xs text-warning">{error}</p>}
+      {playing && <ClipPlayerDialog filePath={playing.clipPath} title={playing.title} vertical={channel.clip.aspectRatio === '9:16'} onClose={() => setPlaying(null)} />}
+    </div>
   )
 }
 

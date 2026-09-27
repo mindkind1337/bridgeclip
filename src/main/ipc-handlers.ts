@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
-import { ensureOutputDir, getJobHistory, getJobOutput, getLivePartInfo, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
+import { ensureOutputDir, getChannelClips, getJobHistory, getJobOutput, getLivePartInfo, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
 import { isReplayUrl, replayLinkAt, secondsIntoStream } from '../shared/live'
 import {
   getEnginePath,
@@ -15,7 +15,7 @@ import {
 } from './pipeline-runner'
 import { createRunRecord, finishRunRecord } from './run-history'
 import { cancelTrackedJob, dismissJob, enqueueJob, initJobManager, listJobs, liveJobIds } from './job-manager'
-import { addLiveChannel, removeLiveChannel, updateLiveChannel } from './live/live-channels'
+import { addLiveChannel, getLiveChannel, removeLiveChannel, updateLiveChannel } from './live/live-channels'
 import { checkLiveChannels, forgetLiveChannel, getLiveOverview, startLiveSession, stopLiveSession } from './live/live-monitor'
 import { activeLiveJobIds } from './live/live-session'
 import { openLivePlayer } from './live/live-player'
@@ -125,6 +125,15 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('live:session:stop', (_event, id: unknown) => stopLiveSession(id))
   handle('live:check', async () => { await checkLiveChannels(); return getLiveOverview() })
   handle('live:watch', (_event, id: unknown) => { openLivePlayer(id) })
+  handle('live:channelClips', (_event, id: unknown) => {
+    const channel = getLiveChannel(id)
+    // The current broadcast when it is recording, else today.
+    const state = getLiveOverview().sessions.find((item) => item.channelId === channel.id)
+    const streamStart = state?.streamStartedAt ? Date.parse(state.streamStartedAt) : NaN
+    const today = new Date(); today.setHours(0, 0, 0, 0)
+    const since = Number.isFinite(streamStart) && state?.status !== 'ended' && state?.status !== 'error' ? streamStart : today.getTime()
+    return getChannelClips(channel, since, loadSettings().outputDirectory)
+  })
 
   handle('automations:list', () => listAutomations())
   handle('automations:create', (_event, name: unknown) => createAutomation(name))

@@ -8,7 +8,7 @@ import { open, readdir } from 'fs/promises'
 import { isAbsolute, join, relative, sep } from 'path'
 import { resolveBinary } from './tools'
 import { parseJobOutput, type JobOutput, type RunTranscript } from '../shared/job-output'
-import { LIVE_OVERLAP_SECONDS, isLiveTimeline, isReplayUrl, type LivePartInfo, type LiveTranscript } from '../shared/live'
+import { LIVE_OVERLAP_SECONDS, isLiveTimeline, isReplayUrl, secondsIntoStream, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveTranscript } from '../shared/live'
 import { readRunRecord } from './run-history'
 
 export interface JobHistoryEntry {
@@ -356,4 +356,50 @@ export function liveTranscriptText(transcript: LiveTranscript): string {
   const body = transcript.lines.map((line) =>
     `[${clock(line.t)}${into !== null ? ` / ${clock(line.t + into)}` : ''}] ${line.speaker ? `(${line.speaker}) ` : ''}${line.text}`)
   return [...header, ...body].join('\n') + '\n'
+}
+
+const MAX_CHANNEL_CLIPS = 60
+
+/**
+ * Clips the library holds from a channel's live since a moment (the current
+ * broadcast's start, or the start of today). Parts are recognised by their
+ * live.json, or for parts recorded before it existed, by their title.
+ */
+export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 'displayName'>, since: number,
+  libraryDir: string): Promise<{ clips: LiveChannelClip[]; parts: number }> {
+  const names = new Set([channel.displayName, channel.url.replace(/\/+$/, '').split('/').pop() ?? '']
+    .map((name) => name.replace(/^@/, '').toLowerCase()).filter(Boolean))
+  let entries: import('fs').Dirent[]
+  try { entries = await readdir(libraryDir, { withFileTypes: true }) } catch { return { clips: [], parts: 0 } }
+  const clips: LiveChannelClip[] = []
+  let parts = 0
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+    const runDir = join(libraryDir, entry.name)
+    const info = await readPartInfo(runDir, libraryDir)
+    if (info && info.channelId !== channel.id) continue
+    const read = await readJobOutput(join(runDir, 'job_output.json'), libraryDir).catch(() => null)
+    if (!read) continue
+    const output = read.data
+    const title = PART_TITLE.exec(output.source_video_title ?? '')
+    if (!info && !(title && names.has(title[1].toLowerCase()))) continue
+    const started = info?.recordingStartedAt ? Date.parse(info.recordingStartedAt) : read.modified.getTime()
+    if (!(started >= since) && !(read.modified.getTime() >= since)) continue
+    parts += 1
+    for (const clip of output.clips) {
+      const path = clip.s3_url.startsWith('file://') ? clip.s3_url.slice('file://'.length) : clip.s3_url
+      const inside = relative(runDir, path)
+      if (!inside || isAbsolute(inside) || inside.startsWith('..')) continue
+      const startSeconds = clip.start_time_ms / 1000
+      clips.push({
+        runDir, clipPath: path, clipIndex: clip.clip_index, title: clip.summary || `Clip ${clip.clip_index + 1}`,
+        score: clip.virality_score, part: info?.part ?? Number(title?.[3] ?? 0), startSeconds, durationMs: clip.duration_ms,
+        intoStream: info ? secondsIntoStream(info, startSeconds) : null,
+        hasReplay: Boolean(info?.replayUrl && info.timeline?.length && info.streamStartedAt),
+        recordedAt: read.modified.toISOString()
+      })
+    }
+  }
+  clips.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || b.score - a.score)
+  return { clips: clips.slice(0, MAX_CHANNEL_CLIPS), parts }
 }

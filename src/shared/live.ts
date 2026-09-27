@@ -100,6 +100,23 @@ export function streamClock(seconds: number): string {
   return `${Math.floor(whole / 3600)}:${String(Math.floor((whole % 3600) / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
 }
 
+/** A clip made from a followed channel's live, as the Live page lists it. */
+export interface LiveChannelClip {
+  runDir: string
+  clipPath: string
+  clipIndex: number
+  title: string
+  score: number
+  part: number
+  /** Seconds into the part, and into the broadcast when known. */
+  startSeconds: number
+  durationMs: number
+  intoStream: number | null
+  hasReplay: boolean
+  /** When its part was recorded (from the run), for ordering. */
+  recordedAt: string
+}
+
 /** Every part of one live session, merged in order without the overlaps. */
 export interface LiveTranscript {
   channel: string
