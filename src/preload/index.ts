@@ -14,7 +14,7 @@ import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
-import type { LiveChannelClip, LiveChannelInput, LiveOverview, LivePartInfo, LiveTranscript } from '../shared/live'
+import type { LiveChannelClip, LiveChannelInput, LiveOverview, LivePartInfo, LiveRunInfo, LiveTranscript } from '../shared/live'
 import type { RunTranscript } from '../shared/job-output'
 
 export interface ClipSettings {
@@ -38,6 +38,8 @@ export interface HistoryEntry {
   finishedAt: string | null
   durationMs: number | null
   errorMessage: string | null
+  /** Set for parts of a live recording. */
+  live?: LiveRunInfo | null
 }
 
 export interface ToolStatus {

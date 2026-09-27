@@ -480,11 +480,14 @@ test('the whole live transcript joins the parts of a session without their overl
     makePart(4, 1530, 90, [[100, 'four']])
     makePart(1, 0, 0, [[5, 'other session']], false, 'Other live 2026-09-27 12.00 (part 1)')
     const live = await getLiveTranscript(first, library)
-    assert.deepEqual(live.lines.map((line) => [line.t, line.part, line.text]), [[10, 1, 'hello'], [590, 1, 'end of one'], [605, 2, 'start of two'], [1630, 4, 'four']])
+    // Recording began 2 h 17 min into the stream: times are into the stream; parts are numbered by their place.
+    const into = 2 * 3600 + 17 * 60
+    assert.equal(live.timeBase, 'stream')
+    assert.deepEqual(live.lines.map((line) => [line.t - into, line.part, line.text]), [[10, 1, 'hello'], [590, 1, 'end of one'], [605, 2, 'start of two'], [1630, 3, 'four']])
     assert.deepEqual(live.missingParts, [3])
     const text = liveTranscriptText(live)
     assert.match(text, /^Streamer — live transcript/)
-    assert.match(text, /\[0:00:10 \/ 2:17:10\] hello/)
+    assert.match(text, /\[2:17:10\] hello/)
 
     // Parts recorded before live.json: grouped by title, offsets from durations and the fixed overlap.
     const old = path.join(dir, 'old')
@@ -546,4 +549,25 @@ test('a replay found after a part was saved is written to that part too', async 
     assert.equal(saved().replayUrl, 'https://www.twitch.tv/videos/2885452707')
     assert.ok(states.at(-1).activity.some((entry) => entry.text.startsWith('Replay found: twitch.tv/videos/2885452707')))
   } finally { cleanup() }
+})
+
+test('library runs are grouped by channel and by broadcast, across restarts', () => {
+  const { groupLibraryByLive } = shared()
+  const run = (id, channel, recordedAt, part, streamStartedAt = null) => ({ jobId: id, date: recordedAt,
+    live: { channel, platform: null, part, streamStartedAt, recordedAt } })
+  const start = '2026-09-27T17:37:58.000Z'
+  const entries = [
+    run('a1', 'asmongold', '2026-09-27T18:17:00.000Z', 1), // before live.json: joins the broadcast that began before it
+    run('a2', 'asmongold', '2026-09-27T18:58:00.000Z', 1, start),
+    run('a3', 'asmongold', '2026-09-27T19:25:00.000Z', 1, start), // after a restart: same broadcast
+    run('j1', 'Jynxzi', '2026-09-27T18:43:00.000Z', 1),
+    run('a4', 'asmongold', '2026-09-26T18:00:00.000Z', 1), // another day
+    { jobId: 'n', date: '2026-09-24T00:00:00.000Z', live: null }
+  ]
+  const { channels, others } = groupLibraryByLive(entries)
+  assert.deepEqual(others.map((entry) => entry.jobId), ['n'])
+  const asmon = channels.find((channel) => channel.channel === 'asmongold')
+  assert.deepEqual(asmon.lives.map((live) => live.entries.map((entry) => entry.jobId)), [['a1', 'a2', 'a3'], ['a4']])
+  assert.equal(asmon.lives[0].streamStartedAt, start)
+  assert.deepEqual(channels.map((channel) => channel.channel), ['asmongold', 'Jynxzi'], 'the channel with the newest part comes first')
 })

@@ -5,10 +5,10 @@ import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
 import { constants, existsSync, lstatSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'fs'
 import { open, readdir } from 'fs/promises'
-import { isAbsolute, join, relative, sep } from 'path'
+import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { resolveBinary } from './tools'
 import { parseJobOutput, type JobOutput, type RunTranscript } from '../shared/job-output'
-import { LIVE_OVERLAP_SECONDS, isLiveTimeline, isReplayUrl, secondsIntoStream, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveTranscript } from '../shared/live'
+import { LIVE_OVERLAP_SECONDS, broadcastTime, isLiveTimeline, isReplayUrl, secondsIntoStream, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveRunInfo, type LiveTranscript } from '../shared/live'
 import { readRunRecord } from './run-history'
 
 export interface JobHistoryEntry {
@@ -22,6 +22,8 @@ export interface JobHistoryEntry {
   finishedAt: string | null
   durationMs: number | null
   errorMessage: string | null
+  /** Set for parts of a live recording. */
+  live?: LiveRunInfo | null
 }
 
 const MAX_JOB_OUTPUT_BYTES = 20 * 1024 * 1024
@@ -123,7 +125,8 @@ export async function getJobHistory(baseDir: string, activeJobIds: ReadonlySet<s
           totalCostUsd: typeof costVal === 'number' ? costVal : null,
           finishedAt: record?.finishedAt ?? result.modified.toISOString(),
           durationMs: durationMs ?? (typeof data.processing_time_seconds === 'number' ? Math.round(data.processing_time_seconds * 1000) : null),
-          errorMessage: null
+          errorMessage: null,
+          live: await liveRunInfo(join(baseDir, dir.name), baseDir, data.source_video_title)
         })
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -273,65 +276,114 @@ async function readPartInfo(runDir: string, libraryDir: string): Promise<LivePar
   try { return livePartInfo((await readLibraryJson(join(runDir, 'live.json'), libraryDir, 64 * 1024))?.value) } catch { return null }
 }
 
+type LiveRunMeta = { runDir: string; info: LivePartInfo | null; title: RegExpExecArray | null; duration: number; titleTime: number | null }
+
+async function liveRunMetas(libraryDir: string): Promise<LiveRunMeta[]> {
+  const metas: LiveRunMeta[] = []
+  for (const entry of await readdir(libraryDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+    const runDir = join(libraryDir, entry.name)
+    const output = await getJobOutput(runDir, libraryDir)
+    if (!output) continue
+    const info = await readPartInfo(runDir, libraryDir)
+    const title = PART_TITLE.exec(output.source_video_title ?? '')
+    if (!info && !title) continue
+    const parsed = title ? new Date(`${title[2].replace(/[.h]/, ':').replace(' ', 'T')}:00`).getTime() : NaN
+    metas.push({ runDir, info, title, duration: Number(output.source_video_duration_seconds) || 0, titleTime: Number.isFinite(parsed) ? parsed : null })
+  }
+  return metas
+}
+
+const sameDay = (a: number, b: number): boolean => new Date(a).toDateString() === new Date(b).toDateString()
+
 /**
- * Join every clipped part of the live session this run belongs to: parts are
- * found through live.json, or for parts recorded before it existed, through
- * their "channel live date (part N)" title, durations and the fixed overlap.
- * Each part's overlap with the previous one is dropped.
+ * Join every clipped part of the live this run belongs to. When the broadcast's
+ * start is known, that is every part of the broadcast, across app restarts and
+ * including older parts of the same channel and day, placed by time into the
+ * stream (exact broadcast times for parts with a timeline). Otherwise the parts
+ * of one recording session, placed from their offsets. Each part's overlap with
+ * the previous part of its session is dropped.
  */
 export async function getLiveTranscript(outputDir: string, libraryDir: string): Promise<LiveTranscript | null> {
-  const own = await readPartInfo(outputDir, libraryDir)
-  const dirs = (await readdir(libraryDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
-    .map((entry) => join(libraryDir, entry.name))
-  type Part = { part: number; runDir: string; offset: number; leadIn: number; hasReplay?: boolean }
-  let parts: Part[] = []
-  let meta: Pick<LiveTranscript, 'channel' | 'sessionId' | 'recordingStartedAt' | 'streamStartedAt'>
-  if (own) {
-    meta = { channel: own.channel, sessionId: own.sessionId, recordingStartedAt: own.recordingStartedAt, streamStartedAt: own.streamStartedAt }
-    for (const dir of dirs) {
-      const info = dir === outputDir ? own : await readPartInfo(dir, libraryDir)
-      if (info?.sessionId === own.sessionId) {
-        parts.push({ part: info.part, runDir: dir, offset: info.streamOffsetSeconds, leadIn: info.part > 1 ? info.leadInSeconds : 0,
-          hasReplay: Boolean(info.replayUrl && info.timeline?.length && info.streamStartedAt) })
-      }
-    }
-  } else {
-    const title = (await getJobOutput(outputDir, libraryDir))?.source_video_title ?? ''
-    const match = PART_TITLE.exec(title)
-    if (!match) return null
-    const found: { part: number; runDir: string; duration: number }[] = []
-    for (const dir of dirs) {
-      const output = dir === outputDir || (await readPartInfo(dir, libraryDir)) === null ? await getJobOutput(dir, libraryDir) : null
-      const other = output ? PART_TITLE.exec(output.source_video_title ?? '') : null
-      if (other && other[1] === match[1] && other[2] === match[2]) {
-        found.push({ part: Number(other[3]), runDir: dir, duration: Number(output?.source_video_duration_seconds) || 0 })
-      }
-    }
-    found.sort((a, b) => a.part - b.part)
-    let offset = 0
-    parts = found.map((item, index) => {
-      const leadIn = item.part > 1 ? Math.min(LIVE_OVERLAP_SECONDS, item.duration / 2) : 0
-      if (index > 0) offset = parts[index - 1].offset + found[index - 1].duration - leadIn
-      const entry = { part: item.part, runDir: item.runDir, offset, leadIn }
-      parts[index] = entry
-      return entry
-    })
-    meta = { channel: match[1], sessionId: null, recordingStartedAt: null, streamStartedAt: null }
+  const metas = await liveRunMetas(libraryDir)
+  const own = metas.find((meta) => resolve(meta.runDir) === resolve(outputDir))
+  if (!own) return null
+  const channelOf = (meta: LiveRunMeta): string => (meta.title?.[1] ?? meta.info?.channel ?? '').toLowerCase()
+  const recordedAt = (meta: LiveRunMeta): number | null =>
+    meta.info?.recordingStartedAt ? Date.parse(meta.info.recordingStartedAt) : meta.titleTime
+  const sessionOf = (meta: LiveRunMeta): string => meta.info ? `s|${meta.info.sessionId}` : `t|${channelOf(meta)}|${meta.title?.[2]}`
+  const channel = channelOf(own)
+
+  let start: number | null = own.info?.streamStartedAt ? Date.parse(own.info.streamStartedAt) : null
+  if (start === null) {
+    const at = recordedAt(own)
+    const starts = metas.flatMap((meta) => meta.info?.streamStartedAt && channelOf(meta) === channel ? [Date.parse(meta.info.streamStartedAt)] : [])
+      .filter((time) => at !== null && sameDay(time, at) && time <= at)
+    start = starts.length ? Math.max(...starts) : null
   }
-  parts.sort((a, b) => a.part - b.part)
-  const result: LiveTranscript = { ...meta, parts: [], missingParts: [], lines: [], chat: [] }
-  for (const [index, part] of parts.entries()) {
-    if (index > 0) for (let missing = parts[index - 1].part + 1; missing < part.part; missing++) result.missingParts.push(missing)
-    const transcript = await getRunTranscript(part.runDir, libraryDir)
-    result.parts.push({ part: part.part, runDir: part.runDir, hasTranscript: Boolean(transcript), hasReplay: part.hasReplay === true })
+  const members = start !== null
+    ? metas.filter((meta) => {
+      if (channelOf(meta) !== channel) return false
+      if (meta.info?.streamStartedAt) return Date.parse(meta.info.streamStartedAt) === start
+      const at = recordedAt(meta)
+      return at !== null && sameDay(at, start!) && at >= start! - 60_000
+    })
+    : metas.filter((meta) => sessionOf(meta) === sessionOf(own))
+
+  // Offsets inside each recording session: saved in live.json, or rebuilt from durations and the fixed overlap.
+  const placed: { meta: LiveRunMeta; sessionPart: number; offset: number; leadIn: number }[] = []
+  const sessions = new Map<string, LiveRunMeta[]>()
+  for (const meta of members) sessions.set(sessionOf(meta), [...(sessions.get(sessionOf(meta)) ?? []), meta])
+  const missingParts: number[] = []
+  for (const runs of sessions.values()) {
+    const partOf = (meta: LiveRunMeta): number => meta.info?.part ?? Number(meta.title?.[3] ?? 0)
+    runs.sort((a, b) => partOf(a) - partOf(b))
+    let offset = 0
+    runs.forEach((meta, index) => {
+      const part = partOf(meta)
+      if (index > 0) for (let missing = partOf(runs[index - 1]) + 1; missing < part; missing++) missingParts.push(missing)
+      if (meta.info) {
+        placed.push({ meta, sessionPart: part, offset: meta.info.streamOffsetSeconds, leadIn: part > 1 ? meta.info.leadInSeconds : 0 })
+        return
+      }
+      const leadIn = part > 1 ? Math.min(LIVE_OVERLAP_SECONDS, meta.duration / 2) : 0
+      if (index > 0) offset += runs[index - 1].duration - leadIn
+      placed.push({ meta, sessionPart: part, offset, leadIn })
+    })
+  }
+  const timeAt = (item: typeof placed[number], seconds: number): number => {
+    if (start === null) return item.offset + seconds
+    const exact = item.meta.info?.timeline?.length ? broadcastTime(item.meta.info.timeline, seconds) : null
+    if (exact !== null) return exact - start / 1000
+    return ((recordedAt(item.meta) ?? start) - start) / 1000 + item.offset + seconds
+  }
+  // Parts are numbered by their place in the live.
+  placed.sort((a, b) => timeAt(a, a.leadIn) - timeAt(b, b.leadIn))
+  const firstRecorded = members.map(recordedAt).filter((time): time is number => time !== null)
+  const result: LiveTranscript = {
+    channel: own.title?.[1] ?? own.info?.channel ?? channel,
+    sessionId: own.info?.sessionId ?? null,
+    recordingStartedAt: firstRecorded.length ? new Date(Math.min(...firstRecorded)).toISOString() : null,
+    streamStartedAt: start !== null ? new Date(start).toISOString() : null,
+    timeBase: start !== null ? 'stream' : 'recording',
+    parts: [], missingParts: sessions.size === 1 ? missingParts : [], lines: [], chat: []
+  }
+  for (const [index, item] of placed.entries()) {
+    const part = index + 1
+    const transcript = await getRunTranscript(item.meta.runDir, libraryDir)
+    const info = item.meta.info
+    result.parts.push({ part, runDir: item.meta.runDir, hasTranscript: Boolean(transcript),
+      hasReplay: Boolean(info?.replayUrl && info.timeline?.length && info.streamStartedAt) })
     for (const line of transcript?.lines ?? []) {
-      if (line.start < part.leadIn) continue
-      result.lines.push({ t: part.offset + line.start, part: part.part, partSeconds: line.start, text: line.text, speaker: line.speaker })
+      if (line.start < item.leadIn) continue
+      result.lines.push({ t: timeAt(item, line.start), part, partSeconds: line.start, text: line.text, speaker: line.speaker })
     }
     for (const message of transcript?.chat?.messages ?? []) {
-      if (message.t >= part.leadIn) result.chat.push({ t: part.offset + message.t, text: message.text })
+      if (message.t >= item.leadIn) result.chat.push({ t: timeAt(item, message.t), text: message.text })
     }
   }
+  result.lines.sort((a, b) => a.t - b.t)
+  result.chat.sort((a, b) => a.t - b.t)
   return result.parts.length ? result : null
 }
 
@@ -340,21 +392,20 @@ function clock(seconds: number): string {
   return `${Math.floor(whole / 3600)}:${String(Math.floor((whole % 3600) / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
 }
 
-/** Plain text of a live transcript, with recording time and, when known, time into the stream. */
+/** Plain text of a live transcript: time into the stream when its start is known, else recording time. */
 export function liveTranscriptText(transcript: LiveTranscript): string {
-  const recording = transcript.recordingStartedAt ? Date.parse(transcript.recordingStartedAt) : NaN
   const stream = transcript.streamStartedAt ? Date.parse(transcript.streamStartedAt) : NaN
-  const into = Number.isFinite(recording) && Number.isFinite(stream) ? (recording - stream) / 1000 : null
+  const recording = transcript.recordingStartedAt ? Date.parse(transcript.recordingStartedAt) : NaN
   const header = [
     `${transcript.channel} — live transcript`,
-    transcript.streamStartedAt ? `Stream started: ${new Date(stream).toLocaleString()}` : null,
-    transcript.recordingStartedAt ? `Recording started: ${new Date(recording).toLocaleString()}` : null,
-    `Parts: ${transcript.parts.map((part) => part.part).join(', ')}${transcript.missingParts.length ? ` (missing: ${transcript.missingParts.join(', ')})` : ''}`,
-    'Times: recording time' + (into !== null ? ' / time into the stream' : '') + '. Skipped ads are not counted.',
+    Number.isFinite(stream) ? `Stream started: ${new Date(stream).toLocaleString()}` : null,
+    Number.isFinite(recording) ? `Recording started: ${new Date(recording).toLocaleString()}` : null,
+    `Parts: ${transcript.parts.length}${transcript.missingParts.length ? ` (missing: ${transcript.missingParts.join(', ')})` : ''}`,
+    transcript.timeBase === 'stream' ? 'Times: time into the stream. Moments before the recording started are not included.'
+      : 'Times: recording time. Skipped ads are not counted.',
     ''
   ].filter((line): line is string => line !== null)
-  const body = transcript.lines.map((line) =>
-    `[${clock(line.t)}${into !== null ? ` / ${clock(line.t + into)}` : ''}] ${line.speaker ? `(${line.speaker}) ` : ''}${line.text}`)
+  const body = transcript.lines.map((line) => `[${clock(line.t)}] ${line.speaker ? `(${line.speaker}) ` : ''}${line.text}`)
   return [...header, ...body].join('\n') + '\n'
 }
 
@@ -402,4 +453,18 @@ export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 
   }
   clips.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || b.score - a.score)
   return { clips: clips.slice(0, MAX_CHANNEL_CLIPS), parts }
+}
+
+/** Live details for the library list: from live.json, or parsed from a part's title for older parts. */
+async function liveRunInfo(runDir: string, libraryDir: string, title: string): Promise<LiveRunInfo | null> {
+  const info = await readPartInfo(runDir, libraryDir)
+  const match = PART_TITLE.exec(title ?? '')
+  const fromTitle = match ? new Date(`${match[2].replace(/[.h]/, ':').replace(' ', 'T')}:00`) : null
+  if (info) {
+    const recordedAt = info.recordingStartedAt ?? (fromTitle && !Number.isNaN(fromTitle.getTime()) ? fromTitle.toISOString() : null)
+    return { channel: match?.[1] ?? info.channel, platform: info.platform, part: info.part, streamStartedAt: info.streamStartedAt,
+      recordedAt: recordedAt ?? new Date(0).toISOString() }
+  }
+  if (!match || !fromTitle || Number.isNaN(fromTitle.getTime())) return null
+  return { channel: match[1], platform: null, part: Number(match[3]), streamStartedAt: null, recordedAt: fromTitle.toISOString() }
 }

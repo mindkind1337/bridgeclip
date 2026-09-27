@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Clapperboard, FolderOpen, LayoutGrid, List, ListVideo, RefreshCw, Search, Sparkles } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Clapperboard, FileText, FolderOpen, LayoutGrid, List, ListVideo, Radio, RefreshCw, Search, Sparkles } from 'lucide-react'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatRelativeDate, formatUsd, localFileUrl } from '../lib/utils'
 import { clipFilePath, loadThumbnail } from '../lib/thumbnails'
@@ -16,10 +16,28 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { Callout } from '../components/ui/Callout'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Segmented } from '../components/ui/Segmented'
+import { Switch } from '../components/ui/Switch'
+import { TranscriptDialog } from '../components/TranscriptDialog'
+import { groupLibraryByLive, type LibraryLive } from '../../shared/live'
 import type { Page as AppPage } from '../components/Sidebar'
 
 type LibraryView = 'grid' | 'details'
 const VIEW_STORAGE_KEY = 'bridgeclip.library.view'
+const GROUP_STORAGE_KEY = 'bridgeclip.library.groupLives'
+
+function savedGrouping(): boolean {
+  try { return localStorage.getItem(GROUP_STORAGE_KEY) !== 'off' } catch { return true }
+}
+
+const DAY = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+const HOUR = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
+
+function liveLabel(live: LibraryLive<HistoryEntry>): string {
+  const start = live.streamStartedAt ?? live.firstRecordedAt
+  const date = new Date(start)
+  const today = new Date().toDateString() === date.toDateString()
+  return `${today ? 'Today' : DAY.format(date)} · ${live.streamStartedAt ? `live since ${HOUR.format(date)}` : `recorded from ${HOUR.format(date)}`}`
+}
 
 function savedView(): LibraryView {
   try { return localStorage.getItem(VIEW_STORAGE_KEY) === 'details' ? 'details' : 'grid' } catch { return 'grid' }
@@ -27,6 +45,13 @@ function savedView(): LibraryView {
 
 export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => void }): React.JSX.Element {
   const [view, setView] = useState<LibraryView>(savedView)
+  const [grouped, setGrouped] = useState(savedGrouping)
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  const [liveTranscript, setLiveTranscript] = useState<{ outputDir: string; output: JobOutput } | null>(null)
+  const chooseGrouping = (next: boolean): void => {
+    setGrouped(next)
+    try { localStorage.setItem(GROUP_STORAGE_KEY, next ? 'on' : 'off') } catch { /* A remembered choice is a convenience only. */ }
+  }
   const chooseView = (next: LibraryView): void => {
     setView(next)
     try { localStorage.setItem(VIEW_STORAGE_KEY, next) } catch { /* A remembered view is a convenience only. */ }
@@ -91,6 +116,92 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
     }
   }
 
+  const openFolder = async (entry: HistoryEntry): Promise<void> => {
+    try {
+      if (!await getApi().shell.openPath(entry.outputDir)) setError('This run folder is no longer available.')
+    } catch (err) {
+      setError(errorMessage(err, 'Could not open this run folder.'))
+    }
+  }
+
+  /** Parts of one live are labeled by their order in it; other runs keep their title. */
+  const renderRuns = (list: HistoryEntry[], labels?: Map<string, string>): React.JSX.Element => view === 'details' ? (
+    <div className="glass overflow-hidden rounded-2xl" role="list" aria-label="Runs">
+      {list.map((entry) => (
+        <RunRow key={entry.jobId} entry={entry} label={labels?.get(entry.jobId)} onOpen={() => openRun(entry)} onOpenFolder={() => void openFolder(entry)} />
+      ))}
+    </div>
+  ) : (
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+      {list.map((entry) => (
+        <RunCard key={entry.jobId} entry={entry} label={labels?.get(entry.jobId)} onOpen={() => openRun(entry)} onOpenFolder={() => void openFolder(entry)} />
+      ))}
+    </div>
+  )
+
+  const openLiveTranscript = async (live: LibraryLive<HistoryEntry>): Promise<void> => {
+    const last = live.entries[live.entries.length - 1]
+    try {
+      const output = parseJobOutput(await getApi().history.getJob(last.outputDir))
+      if (output) setLiveTranscript({ outputDir: last.outputDir, output })
+      else setError('This live has no readable part.')
+    } catch (err) {
+      setError(errorMessage(err, 'Could not open the transcript.'))
+    }
+  }
+
+  const renderGroups = (): React.JSX.Element => {
+    const { channels, others } = groupLibraryByLive(filtered)
+    return (
+      <div className="space-y-8">
+        {channels.map((channel) => (
+          <section key={channel.channel} aria-label={channel.channel}>
+            <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-ink">
+              <Radio aria-hidden className="h-4 w-4 text-danger" />{channel.channel}
+              <span className="text-xs font-normal text-ink-subtle">
+                {channel.lives.length} live{channel.lives.length === 1 ? '' : 's'} · {channel.lives.reduce((sum, live) => sum + live.entries.reduce((n, e) => n + e.clipCount, 0), 0)} clips
+              </span>
+            </h2>
+            <div className="space-y-4">
+              {channel.lives.map((live) => {
+                const clips = live.entries.reduce((sum, entry) => sum + entry.clipCount, 0)
+                const cost = live.entries.reduce((sum, entry) => sum + (entry.totalCostUsd ?? 0), 0)
+                const isCollapsed = collapsed.has(live.key)
+                const labels = new Map(live.entries.map((entry, index) =>
+                  [entry.jobId, `Part ${index + 1} · recorded ${HOUR.format(new Date(entry.live!.recordedAt))}${entry.live!.part !== index + 1 ? ` (session part ${entry.live!.part})` : ''}`]))
+                return (
+                  <div key={live.key} className="rounded-2xl border border-white/[0.06] p-2">
+                    <div className="flex flex-wrap items-center gap-2 px-1.5 pb-2">
+                      <button type="button" aria-expanded={!isCollapsed} onClick={() => setCollapsed((current) => {
+                        const next = new Set(current); if (next.has(live.key)) next.delete(live.key); else next.add(live.key); return next
+                      })} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                        <ChevronDown aria-hidden className={cn('h-4 w-4 shrink-0 text-ink-subtle transition-transform', isCollapsed && '-rotate-90')} />
+                        <span className="text-sm font-medium text-ink">{liveLabel(live)}</span>
+                        <span className="text-xs text-ink-subtle">
+                          {live.entries.length} part{live.entries.length === 1 ? '' : 's'} · {clips} clip{clips === 1 ? '' : 's'}{cost > 0 ? ` · ${formatUsd(cost)}` : ''}
+                        </span>
+                      </button>
+                      <Button size="sm" variant="ghost" icon={<FileText className="h-3.5 w-3.5" />} onClick={() => void openLiveTranscript(live)}>
+                        Transcript
+                      </Button>
+                    </div>
+                    {!isCollapsed && renderRuns(live.entries, labels)}
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        ))}
+        {others.length > 0 && (
+          <section aria-label="Other videos">
+            {channels.length > 0 && <h2 className="mb-2 text-sm font-semibold text-ink">Other videos</h2>}
+            {renderRuns(others)}
+          </section>
+        )}
+      </div>
+    )
+  }
+
   if (open) {
     return (
       <ClipList
@@ -151,6 +262,10 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
             leading={<Search className="h-3.5 w-3.5" />}
             aria-label="Search runs"
           />
+          <label className="flex items-center gap-2 text-xs text-ink-muted">
+            <Switch checked={grouped} onChange={chooseGrouping} label="Group lives" />
+            Group lives
+          </label>
           <Segmented
             size="sm"
             label="Library view"
@@ -193,49 +308,20 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
             <Search className="h-5 w-5 text-ink-subtle" />
             <p className="mt-3 text-sm text-ink-muted">No runs match “{query}”.</p>
           </div>
-        ) : view === 'details' ? (
-          <div className="glass overflow-hidden rounded-2xl" role="list" aria-label="Runs">
-            {filtered.map((entry) => (
-              <RunRow
-                key={entry.jobId}
-                entry={entry}
-                onOpen={() => openRun(entry)}
-                onOpenFolder={async () => {
-                  try {
-                    if (!await getApi().shell.openPath(entry.outputDir)) setError('This run folder is no longer available.')
-                  } catch (err) {
-                    setError(errorMessage(err, 'Could not open this run folder.'))
-                  }
-                }}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
-            {filtered.map((entry) => (
-              <RunCard
-                key={entry.jobId}
-                entry={entry}
-                onOpen={() => openRun(entry)}
-                onOpenFolder={async () => {
-                  try {
-                    if (!await getApi().shell.openPath(entry.outputDir)) setError('This run folder is no longer available.')
-                  } catch (err) {
-                    setError(errorMessage(err, 'Could not open this run folder.'))
-                  }
-                }}
-              />
-            ))}
-          </div>
-        )}
+        ) : grouped ? renderGroups() : renderRuns(filtered)}
       </div>
+      {liveTranscript && (
+        <TranscriptDialog outputDir={liveTranscript.outputDir} output={liveTranscript.output} initialScope="live" onClose={() => setLiveTranscript(null)} />
+      )}
     </Page>
   )
 }
 
 /** One run per line: a small thumbnail and the full title, date, clip count and cost. */
-function RunRow({ entry, onOpen, onOpenFolder }: {
+function RunRow({ entry, label, onOpen, onOpenFolder }: {
   entry: HistoryEntry
+  /** Shown instead of the title (the title stays in the tooltip). */
+  label?: string
   onOpen: () => void
   onOpenFolder: () => void
 }): React.JSX.Element {
@@ -255,9 +341,9 @@ function RunRow({ entry, onOpen, onOpenFolder }: {
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-sm font-medium leading-snug text-ink">
-            {failed ? `${entry.status === 'incomplete' ? 'Unfinished' : 'Unreadable'} run · Open folder` : entry.videoTitle}
+            {failed ? `${entry.status === 'incomplete' ? 'Unfinished' : 'Unreadable'} run · Open folder` : label ?? entry.videoTitle}
           </p>
-          <p className="mt-0.5 text-xs text-ink-subtle">{formatRelativeDate(entry.date)}</p>
+          <p className="mt-0.5 text-xs text-ink-subtle" title={entry.videoTitle}>{formatRelativeDate(entry.date)}</p>
         </div>
         {!failed && (
           <span className="w-20 shrink-0 text-right text-xs text-ink-muted">
@@ -274,8 +360,10 @@ function RunRow({ entry, onOpen, onOpenFolder }: {
   )
 }
 
-function RunCard({ entry, onOpen, onOpenFolder }: {
+function RunCard({ entry, label, onOpen, onOpenFolder }: {
   entry: HistoryEntry
+  /** Shown instead of the title (the title stays in the tooltip). */
+  label?: string
   onOpen: () => void
   onOpenFolder: () => void
 }): React.JSX.Element {
@@ -321,7 +409,7 @@ function RunCard({ entry, onOpen, onOpenFolder }: {
       </div>
       <div className="px-2 pb-2 pt-3.5">
         <p className="truncate text-sm font-medium text-ink" title={entry.videoTitle}>
-          {failed ? `${entry.status === 'incomplete' ? 'Unfinished' : 'Unreadable'} run · Open folder` : entry.videoTitle}
+          {failed ? `${entry.status === 'incomplete' ? 'Unfinished' : 'Unreadable'} run · Open folder` : label ?? entry.videoTitle}
         </p>
         <p className="mt-1 flex items-center gap-1.5 text-xs text-ink-subtle">
           <span>{formatRelativeDate(entry.date)}</span>

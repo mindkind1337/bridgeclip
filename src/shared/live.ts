@@ -100,6 +100,83 @@ export function streamClock(seconds: number): string {
   return `${Math.floor(whole / 3600)}:${String(Math.floor((whole % 3600) / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
 }
 
+/** What the library knows about a run that is a part of a live. */
+export interface LiveRunInfo {
+  channel: string
+  platform: LivePlatform | null
+  part: number
+  /** The broadcast's start, when the part saved it (groups parts of one live across restarts). */
+  streamStartedAt: string | null
+  /** When recording of this part's session began (from live.json, or the part's title). */
+  recordedAt: string
+}
+
+export interface LibraryLive<T> {
+  key: string
+  channel: string
+  platform: LivePlatform | null
+  streamStartedAt: string | null
+  firstRecordedAt: string
+  /** Parts in order. */
+  entries: T[]
+}
+
+export interface LibraryChannel<T> {
+  channel: string
+  platform: LivePlatform | null
+  /** Newest live first. */
+  lives: LibraryLive<T>[]
+}
+
+/**
+ * Group library runs by channel, then by live broadcast. Parts that saved the
+ * broadcast's start join that broadcast even across app restarts; older parts
+ * without it join a broadcast of the same channel and day that began before
+ * them, or else form one live per channel and day. Runs that are not live
+ * parts are returned apart.
+ */
+export function groupLibraryByLive<T extends { live?: LiveRunInfo | null; date: string }>(entries: readonly T[]): { channels: LibraryChannel<T>[]; others: T[] } {
+  const others: T[] = []
+  const lives = new Map<string, LibraryLive<T>>()
+  const day = (iso: string): string => new Date(iso).toDateString()
+  const dated = entries.filter((entry) => entry.live).sort((a, b) => Number(Boolean(b.live!.streamStartedAt)) - Number(Boolean(a.live!.streamStartedAt)))
+  for (const entry of entries) if (!entry.live) others.push(entry)
+  for (const entry of dated) {
+    const live = entry.live!
+    const channelKey = live.channel.toLowerCase()
+    let key: string
+    if (live.streamStartedAt) key = `${channelKey}|${live.streamStartedAt}`
+    else {
+      const recorded = Date.parse(live.recordedAt)
+      const match = [...lives.values()].filter((group) => group.channel.toLowerCase() === channelKey && group.streamStartedAt &&
+        day(group.streamStartedAt) === day(live.recordedAt) && Date.parse(group.streamStartedAt) <= recorded)
+        .sort((a, b) => Date.parse(b.streamStartedAt!) - Date.parse(a.streamStartedAt!))[0]
+      key = match?.key ?? `${channelKey}|day|${day(live.recordedAt)}`
+    }
+    const group = lives.get(key) ?? { key, channel: live.channel, platform: live.platform, streamStartedAt: live.streamStartedAt,
+      firstRecordedAt: live.recordedAt, entries: [] }
+    if (!group.platform && live.platform) group.platform = live.platform
+    if (Date.parse(live.recordedAt) < Date.parse(group.firstRecordedAt)) group.firstRecordedAt = live.recordedAt
+    group.entries.push(entry)
+    lives.set(key, group)
+  }
+  const channels = new Map<string, LibraryChannel<T>>()
+  for (const group of lives.values()) {
+    group.entries.sort((a, b) => Date.parse(a.live!.recordedAt) - Date.parse(b.live!.recordedAt) || a.live!.part - b.live!.part)
+    const key = group.channel.toLowerCase()
+    const channel = channels.get(key) ?? { channel: group.channel, platform: group.platform, lives: [] }
+    if (!channel.platform && group.platform) channel.platform = group.platform
+    channel.lives.push(group)
+    channels.set(key, channel)
+  }
+  const latest = (group: LibraryLive<T>): number => Math.max(...group.entries.map((entry) => Date.parse(entry.date)))
+  for (const channel of channels.values()) channel.lives.sort((a, b) => latest(b) - latest(a))
+  return {
+    channels: [...channels.values()].sort((a, b) => latest(b.lives[0]) - latest(a.lives[0])),
+    others
+  }
+}
+
 /** A clip made from a followed channel's live, as the Live page lists it. */
 export interface LiveChannelClip {
   runDir: string
@@ -123,10 +200,12 @@ export interface LiveTranscript {
   sessionId: string | null
   recordingStartedAt: string | null
   streamStartedAt: string | null
+  /** "stream": times are seconds into the broadcast (its start is known); "recording": since recording began. */
+  timeBase: 'stream' | 'recording'
   parts: { part: number; runDir: string; hasTranscript: boolean; hasReplay: boolean }[]
   /** Parts between the first and last that are not in the library (failed or deleted). */
   missingParts: number[]
-  /** `t` is seconds of recorded content since the session started. */
+  /** `t` is in `timeBase` seconds; `part` numbers parts by their place in the live. */
   lines: { t: number; part: number; partSeconds: number; text: string; speaker: string | null }[]
   chat: { t: number; text: string }[]
 }

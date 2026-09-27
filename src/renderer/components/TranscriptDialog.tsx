@@ -20,7 +20,13 @@ function clock(seconds: number): string {
 }
 
 /** The run's transcript, and for live parts its chat, with the passages that became clips marked. */
-export function TranscriptDialog({ outputDir, output, onClose }: { outputDir: string; output: JobOutput; onClose: () => void }): React.JSX.Element {
+export function TranscriptDialog({ outputDir, output, onClose, initialScope = 'part' }: {
+  outputDir: string
+  output: JobOutput
+  onClose: () => void
+  /** Open on the whole live (for a live part). */
+  initialScope?: 'part' | 'live'
+}): React.JSX.Element {
   const titleId = useId()
   const panel = useRef<HTMLDivElement>(null)
   const close = useRef(onClose)
@@ -30,7 +36,7 @@ export function TranscriptDialog({ outputDir, output, onClose }: { outputDir: st
   const [tab, setTab] = useState<'transcript' | 'chat'>('transcript')
   const [query, setQuery] = useState('')
   const [live, setLive] = useState<LiveTranscript | null>(null)
-  const [scope, setScope] = useState<'part' | 'live'>('part')
+  const [scope, setScope] = useState<'part' | 'live'>(initialScope)
   const [exported, setExported] = useState<string | null>(null)
   const [partInfo, setPartInfo] = useState<LivePartInfo | null>(null)
 
