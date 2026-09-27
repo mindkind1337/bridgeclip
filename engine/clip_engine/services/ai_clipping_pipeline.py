@@ -106,6 +106,8 @@ class ClippingJobRequest:
     audience_notes: Optional[str] = None
     # Live recordings: where this part sits in the live (what comes before and after it).
     context_notes: Optional[str] = None
+    # A moment (seconds) that must end up in a clip, e.g. the chat's biggest laugh.
+    priority_moment_seconds: Optional[float] = None
     layout_style: str = LayoutStyle.AUTO
     # "tight" cuts dead air and filler words; "natural" keeps original timing.
     pacing: str = "tight"
@@ -341,6 +343,7 @@ class AIClippingPipeline:
                 aspect_ratio=request.aspect_ratio,
                 audience_notes=request.audience_notes,
                 context_notes=request.context_notes,
+                priority_moment_seconds=request.priority_moment_seconds,
             )
             stage_timings["planning"] = time.perf_counter() - stage_start
             logger.info(f"Planned {len(clip_plan.segments)} clips")

@@ -170,6 +170,15 @@ class LiveRunnerTests(unittest.TestCase):
         untimed = FakeChunk(1, "p.mp4", 0.0, 300.0, 0.0)
         self.assertEqual(live.chat_for_chunk(chat, untimed), ([], None, None))
 
+    @unittest.skipIf(importlib.util.find_spec("clip_engine") is None, "needs the engine on PYTHONPATH")
+    def test_chat_priority_targets_the_biggest_laugh_only_when_on(self):
+        messages = [(300.0 + i * 0.5, "KEKW") for i in range(6)]
+        self.assertEqual(live.priority_moment(messages, True), 297.0)
+        self.assertIsNone(live.priority_moment(messages, False))
+        self.assertIsNone(live.priority_moment([], True))
+        with self.assertRaises(ValueError):
+            live.validate_spec(self.spec(chat_priority="yes"))
+
     def test_the_planner_is_told_about_the_part_boundary(self):
         middle = FakeChunk(2, "p.mp4", 510.0, 600.0, 90.0)
         text = live.part_context(middle, 90)

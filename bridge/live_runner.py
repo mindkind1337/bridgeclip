@@ -72,6 +72,8 @@ def validate_spec(spec: object) -> dict:
     for field, low, high in (("chunk_seconds", 60, 3600), ("overlap_seconds", 0, 300), ("max_clips_per_chunk", 1, 10)):
         if type(spec.get(field)) is not int or not low <= spec[field] <= high:
             raise ValueError(f"Invalid {field}")
+    if "chat_priority" in spec and not isinstance(spec["chat_priority"], bool):
+        raise ValueError("Invalid chat_priority")
     if spec["overlap_seconds"] * 2 >= spec["chunk_seconds"]:
         raise ValueError("Overlap must be under half the chunk length")
     clip = spec.get("clip")
@@ -306,6 +308,15 @@ def part_context(chunk, overlap_seconds: int) -> str:
     return " ".join(lines)
 
 
+def priority_moment(messages, enabled: bool):
+    """With chat priority on: the chunk time of the chat's biggest laugh (laughs lag the moment by a few seconds)."""
+    if not enabled or not messages:
+        return None
+    from clip_engine.services.live_chat import laugh_peak
+    peak = laugh_peak(messages)
+    return None if peak is None else max(0.0, peak - 3)
+
+
 def chat_for_chunk(chat, chunk) -> tuple:
     """(messages on the chunk's timeline, planner notes, stats); empty without chat or timing."""
     if chat is None or not getattr(chunk, "timeline", ()):
@@ -327,6 +338,12 @@ async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobR
     bridge.emit({"type": "chunk_started", **placement})
     _clipping_part.update(part=chunk.part, step=None)
     chat_messages, chat_notes, chat_stats = chat_for_chunk(chat, chunk)
+    priority = priority_moment(chat_messages, spec.get("chat_priority") is True)
+    context = part_context(chunk, spec["overlap_seconds"])
+    if priority is not None:
+        context += (f" PRIORITY: the chat laughed the most at about {priority:.0f} s. Return one clip that includes"
+                    " that moment and the setup that caused the laughter.")
+        bridge.emit({"type": "chat_priority", "part": chunk.part, "at_s": priority})
     if chat is not None:
         bridge.emit({"type": "chat_summary", "part": chunk.part,
                      **({key: chat_stats[key] for key in ("messages", "peak_s", "peak_count", "peak_reaction", "laughs")
@@ -348,7 +365,8 @@ async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobR
             banner_channel_url=clip.get("banner_channel_url"),
             keyterms=clip.get("keyterms") or None,
             audience_notes=chat_notes,
-            context_notes=part_context(chunk, spec["overlap_seconds"]),
+            context_notes=context,
+            priority_moment_seconds=priority,
         )
         started = time.monotonic()
         result = await pipeline.process_video(request)

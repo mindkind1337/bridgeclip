@@ -211,6 +211,10 @@ class VisionFrame:
     height: int
 
 
+PRIORITY_TAG = "chat_priority"
+# A priority clip starts this long before the moment (its setup) and ends this long after.
+PRIORITY_SETUP_SECONDS = 30
+PRIORITY_AFTER_SECONDS = 8
 MAX_AUDIENCE_NOTES_CHARS = 6000
 AUDIENCE_NOTES_INTRO = (
     "\n\nLIVE CHAT REACTIONS. This video is a recording of a live stream. Below is how its chat reacted, "
@@ -391,6 +395,7 @@ class IntelligencePlannerService:
         aspect_ratio: str = "9:16",
         audience_notes: Optional[str] = None,
         context_notes: Optional[str] = None,
+        priority_moment_seconds: Optional[float] = None,
     ) -> ClipPlanResponse:
         """
         Plan viral clips from video content.
@@ -410,6 +415,7 @@ class IntelligencePlannerService:
             aspect_ratio: Output aspect ratio; long 16:9 clips are planned as longform edits
             audience_notes: Optional live-chat reaction summary (per time window) for live recordings
             context_notes: Optional plain instructions about the source (e.g. it is one part of a live recording)
+            priority_moment_seconds: Optional moment (seconds) that must be in a clip, e.g. the chat's biggest laugh
 
         Returns:
             ClipPlanResponse with identified clips
@@ -424,6 +430,7 @@ class IntelligencePlannerService:
         # Store time range for validation
         self._start_time_seconds = start_time_seconds
         self._end_time_seconds = end_time_seconds
+        self._priority_moment = priority_moment_seconds
         
         # Filter transcript segments by time range if specified
         if start_time_seconds is not None or end_time_seconds is not None:
@@ -1076,6 +1083,7 @@ Do not overlap clips by more than 5 seconds."""
                 insights = parsed.get("insights")
             
             logger.info(f"Found {len(clips_data)} clips in response before validation")
+            clips_data = self._with_priority_clip([clip for clip in clips_data if isinstance(clip, dict)])
             
             # Duration bounds resolved in plan_clips (re-resolved so direct
             # callers can't disagree with the prompt).
@@ -1452,6 +1460,39 @@ Do not overlap clips by more than 5 seconds."""
         except (TypeError, ValueError):
             return 0.5
 
+    def _with_priority_clip(self, clips_data: list[dict]) -> list[dict]:
+        """Make sure a clip contains the priority moment (e.g. the chat's biggest laugh).
+
+        A planned clip that already covers it is tagged; otherwise one is added
+        around it (setup before, reaction after). Both then go through the usual
+        boundary snapping and length rules, and _finalize_clips keeps them first.
+        """
+        moment = getattr(self, "_priority_moment", None)
+        if moment is None:
+            return clips_data
+
+        def seconds(clip: dict, *keys: str) -> Optional[float]:
+            for key in keys:
+                value = clip.get(key)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return value / 1000 if value > 100000 else float(value)
+            return None
+
+        for clip in clips_data:
+            start = seconds(clip, "start_time", "startTime", "start")
+            end = seconds(clip, "end_time", "endTime", "end")
+            if start is not None and end is not None and start <= moment <= end + 5:
+                clip["tags"] = [*[t for t in clip.get("tags", []) if isinstance(t, str)], PRIORITY_TAG]
+                logger.info("Priority moment at %.1fs is already in a planned clip", moment)
+                return clips_data
+        transcript = getattr(self, "_current_transcript", []) or []
+        start, end = max(0.0, moment - PRIORITY_SETUP_SECONDS), moment + PRIORITY_AFTER_SECONDS
+        words = " ".join(seg.text for seg in transcript if seg.end_time_ms / 1000 > start and seg.start_time_ms / 1000 < end)
+        summary = " ".join(words.split()[:8]) or "The chat's biggest laugh"
+        logger.info("Adding a clip around the priority moment at %.1fs", moment)
+        return [*clips_data, {"start_time": start, "end_time": end, "summary": summary[:80], "tags": [PRIORITY_TAG],
+                              "virality_score": 0.7}]
+
     def _finalize_clips(
         self,
         clips: list[ClipPlanSegment],
@@ -1460,9 +1501,10 @@ Do not overlap clips by more than 5 seconds."""
         """Rank clips best-first, drop heavy overlaps, and cap to clip_count.
 
         The prompt asks for no overlap, but after boundary snapping two clips
-        can still end up covering the same moment; keep the stronger one.
+        can still end up covering the same moment; keep the stronger one. A
+        priority clip (see _with_priority_clip) is kept first.
         """
-        ranked = sorted(clips, key=lambda c: c.virality_score, reverse=True)
+        ranked = sorted(clips, key=lambda c: (PRIORITY_TAG in c.tags, c.virality_score), reverse=True)
         kept: list[ClipPlanSegment] = []
         for clip in ranked:
             overlaps = any(

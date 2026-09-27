@@ -119,3 +119,10 @@ def test_bots_and_commands_are_not_counted_as_reactions():
     event = {'event': 'App\\Events\\ChatMessageEvent', 'data': json.dumps(
         {'content': 'W', 'created_at': '2026-09-27T18:00:00Z', 'sender': {'username': 'BotRixOficial'}})}
     assert chat.parse_kick_event(json.dumps(event)) is None
+
+
+def test_laugh_peak_finds_the_biggest_laugh_not_the_busiest_window():
+    messages = [(100.0 + i * 0.1, 'W') for i in range(40)]  # hype, not laughs
+    messages += [(300.0 + i * 0.5, 'KEKW') for i in range(8)] + [(420.0, 'lol'), (421.0, 'LUL')]
+    assert chat.laugh_peak(messages) == 300.0
+    assert chat.laugh_peak([(5.0, 'LUL'), (6.0, 'lol')]) is None, 'two laughs are not a peak'

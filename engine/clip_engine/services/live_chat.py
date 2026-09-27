@@ -132,6 +132,18 @@ def summarize(messages: list[tuple[float, str]], duration: float, window: int = 
     return "\n".join(lines), stats
 
 
+def laugh_peak(messages: list[tuple[float, str]], window: int = WINDOW_SECONDS, minimum: int = 3) -> Optional[float]:
+    """Start of the window where most viewers laughed (at least `minimum` laughs), or None."""
+    laughs: Counter = Counter()
+    for position, text in messages:
+        if any(reaction_kind(token) == "laugh" for token in TOKEN.findall(text)):
+            laughs[int(position // window)] += 1
+    if not laughs:
+        return None
+    index, count = max(laughs.items(), key=lambda item: (item[1], -item[0]))
+    return float(index * window) if count >= minimum else None
+
+
 def save_chat(path: str, messages: list[tuple[float, str]], stats: dict) -> None:
     """Keep a part's chat next to its clips (for review in the app)."""
     kept = messages[:MAX_SAVED_MESSAGES]

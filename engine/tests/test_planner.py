@@ -300,3 +300,24 @@ class TestPlanClips:
         ])
         assert result.api_costs.attempts == 2
         assert result.api_costs.estimated_cost_usd == 0.03
+
+
+def test_priority_moment_is_kept_in_a_clip():
+    from types import SimpleNamespace
+    from clip_engine.services import intelligence_planner as planner_module
+    from clip_engine.services.intelligence_planner import ClipPlanSegment, IntelligencePlannerService, PRIORITY_TAG
+
+    planner = IntelligencePlannerService.__new__(IntelligencePlannerService)
+    planner._priority_moment = 300.0
+    planner._current_transcript = [SimpleNamespace(start_time_ms=280_000, end_time_ms=290_000, text='He is not gonna make that jump')]
+    missed = planner._with_priority_clip([{'start_time': 10, 'end_time': 50}])
+    assert missed[-1]['start_time'] == 270.0 and missed[-1]['end_time'] == 308.0
+    assert missed[-1]['tags'] == [PRIORITY_TAG] and missed[-1]['summary'].startswith('He is not gonna')
+    covered = planner._with_priority_clip([{'start_time': 280, 'end_time': 310, 'tags': ['funny']}])
+    assert len(covered) == 1 and covered[0]['tags'] == ['funny', PRIORITY_TAG]
+    planner._priority_moment = None
+    assert planner._with_priority_clip([{'start_time': 1, 'end_time': 2}]) == [{'start_time': 1, 'end_time': 2}]
+
+    strong = ClipPlanSegment(0, 40_000, 0.9)
+    priority = ClipPlanSegment(270_000, 308_000, 0.6, tags=[PRIORITY_TAG])
+    assert planner._finalize_clips([strong, priority], 1) == [priority], 'the priority clip survives the cap'

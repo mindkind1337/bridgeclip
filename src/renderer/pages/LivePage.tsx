@@ -47,8 +47,9 @@ const PLATFORM: Record<LiveChannel['platform'], { tile: string; icon: React.Reac
 }
 
 function inputFor(channel: LiveChannel): LiveChannelInput {
-  const { url, displayName, enabled, automationId, clip, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes } = channel
-  return { url, displayName, enabled, automationId, clip: { ...clip, durationRanges: [...clip.durationRanges] }, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes }
+  const { url, displayName, enabled, automationId, clip, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes, chatPriority } = channel
+  return { url, displayName, enabled, automationId, clip: { ...clip, durationRanges: [...clip.durationRanges] }, minScore, maxClipsPerChunk,
+    maxPostsPerHour, chunkMinutes, chatPriority: chatPriority === true }
 }
 
 const HOUR = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
@@ -498,6 +499,14 @@ function ChannelSettings({ channel, automations, saving, onSave, onRemove }: {
           <span>each</span>
         </div>
       </Row>
+      {channel.platform !== 'youtube' && (
+        <Row label="Chat" hint="Each part gets a clip of its biggest chat laugh (KEKW, LUL, 😂…), with the moment that caused it, even if the AI ranked it lower.">
+          <div className="flex items-center gap-2 text-2xs text-ink-muted">
+            <Switch checked={draft.chatPriority === true} onChange={(chatPriority) => setDraft({ ...draft, chatPriority })} label="Chat priority" />
+            Chat priority: always clip the biggest laugh
+          </div>
+        </Row>
+      )}
       <Row label="Posting" hint="Only clips at or above the score are queued. Every clip is still saved to the Library.">
         <div className="flex flex-wrap items-center gap-1.5 text-2xs text-ink-muted">
           <Select size="sm" className="w-[200px]" aria-label="Automation" value={draft.automationId ?? ''}

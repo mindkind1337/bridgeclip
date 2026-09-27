@@ -28,11 +28,13 @@ export interface LiveChannel {
   maxClipsPerChunk: number
   maxPostsPerHour: number
   chunkMinutes: number
+  /** Always make a clip of each part's biggest chat laugh (Twitch and Kick). Missing in older channels: off. */
+  chatPriority?: boolean
   createdAt: string
 }
 
 export type LiveChannelInput = Pick<LiveChannel, 'url' | 'enabled' | 'automationId' | 'clip' | 'minScore' |
-  'maxClipsPerChunk' | 'maxPostsPerHour' | 'chunkMinutes'> & { displayName?: string }
+  'maxClipsPerChunk' | 'maxPostsPerHour' | 'chunkMinutes' | 'chatPriority'> & { displayName?: string }
 
 export type LiveSessionStatus = 'offline' | 'resolving' | 'recording' | 'stopping' | 'ended' | 'error'
 
@@ -384,6 +386,7 @@ export function parseLiveChannelInput(value: unknown): LiveChannelInput & { plat
   if (!inRange(input.maxClipsPerChunk, LIVE_LIMITS.maxClipsPerChunk, true)) throw new Error('Clips per part must be between 1 and 5')
   if (!inRange(input.maxPostsPerHour, LIVE_LIMITS.maxPostsPerHour, true)) throw new Error('Posts per hour must be between 1 and 12')
   if (!inRange(input.chunkMinutes, LIVE_LIMITS.chunkMinutes, true)) throw new Error('Part length must be between 5 and 20 minutes')
+  if (input.chatPriority !== undefined && typeof input.chatPriority !== 'boolean') throw new Error('Invalid chat priority option')
   const name = typeof input.displayName === 'string' ? input.displayName.trim() : ''
   if (name.length > 80 || Array.from(name).some((c) => c.charCodeAt(0) <= 31 || c.charCodeAt(0) === 127)) throw new Error('Use a name of up to 80 characters.')
   const clip = input.clip
@@ -393,7 +396,7 @@ export function parseLiveChannelInput(value: unknown): LiveChannelInput & { plat
     clip: { clippingMode: clip.clippingMode, aspectRatio: clip.aspectRatio, durationRanges: [...clip.durationRanges],
       layoutStyle: clip.layoutStyle, pacing: clip.pacing, includeCaptions: clip.includeCaptions, captionPreset: clip.captionPreset },
     minScore: input.minScore, maxClipsPerChunk: input.maxClipsPerChunk,
-    maxPostsPerHour: input.maxPostsPerHour, chunkMinutes: input.chunkMinutes
+    maxPostsPerHour: input.maxPostsPerHour, chunkMinutes: input.chunkMinutes, chatPriority: input.chatPriority === true
   }
 }
 

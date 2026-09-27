@@ -117,6 +117,7 @@ export class LiveSession {
       chunk_seconds: this.channel.chunkMinutes * 60,
       overlap_seconds: liveOverlapSeconds(this.channel.clip.durationRanges, this.channel.chunkMinutes),
       max_clips_per_chunk: this.channel.maxClipsPerChunk,
+      chat_priority: this.channel.chatPriority === true,
       clip: {
         clipping_mode: clip.clippingMode,
         layout_vision_enabled: clip.clippingMode !== 'economy',
@@ -290,6 +291,12 @@ export class LiveSession {
           this.update({ replayUrl: message.url })
           // Parts saved before the replay was known get it too.
           for (const [runDirectory, chunk] of this.savedParts) this.savePartInfo(runDirectory, chunk)
+        }
+        break
+      case 'chat_priority':
+        if (Number.isInteger(message.part) && finite(message.at_s)) {
+          this.log(`Part ${message.part}: chat priority — the biggest laugh is at ${clock(message.at_s)}, a clip will include it`)
+          this.update({})
         }
         break
       case 'chunk_progress': {
