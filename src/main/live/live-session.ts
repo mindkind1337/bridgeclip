@@ -51,7 +51,7 @@ function duration(seconds: number): string {
   return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`
 }
 
-const HOUR_MINUTE = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+const HOUR_MINUTE = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
 /** A stream start within this of the recording start counts as recording from the beginning. */
 const FROM_START_SECONDS = 120
 

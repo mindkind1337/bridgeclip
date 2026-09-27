@@ -7,9 +7,10 @@ import { ClipPlayerDialog } from './ClipPlayerDialog'
 import { Segmented } from './ui/Segmented'
 
 /** All clips of one live at a glance: score, chat spike, part, time in the live, play and replay. */
-export function LiveClipsTable({ runDirs, vertical = true }: { runDirs: string[]; vertical?: boolean }): React.JSX.Element {
+export function LiveClipsTable({ runDirs, vertical = true, limit }: { runDirs: string[]; vertical?: boolean; limit?: number }): React.JSX.Element {
   const [clips, setClips] = useState<LiveChannelClip[] | null>(null)
   const [order, setOrder] = useState<'score' | 'time'>('score')
+  const [all, setAll] = useState(false)
   const [playing, setPlaying] = useState<LiveChannelClip | null>(null)
   const [error, setError] = useState<string | null>(null)
   const key = runDirs.join('|')
@@ -39,7 +40,7 @@ export function LiveClipsTable({ runDirs, vertical = true }: { runDirs: string[]
       <table className="w-full text-xs">
         <thead className="sr-only"><tr><th>Play</th><th>Title</th><th>Score</th><th>Chat</th><th>Part</th><th>In the live</th><th>Replay</th></tr></thead>
         <tbody>
-          {sorted.map((clip) => (
+          {(all || !limit ? sorted : sorted.slice(0, limit)).map((clip) => (
             <tr key={`${clip.runDir}-${clip.clipIndex}`} className="border-b border-white/[0.04] last:border-b-0 hover:bg-white/[0.03]">
               <td className="w-10 py-1.5 pl-2">
                 <button type="button" onClick={() => setPlaying(clip)} aria-label={`Play “${clip.title}”`} title="Play here"
@@ -76,6 +77,11 @@ export function LiveClipsTable({ runDirs, vertical = true }: { runDirs: string[]
           ))}
         </tbody>
       </table>
+      {limit && sorted.length > limit && (
+        <button type="button" onClick={() => setAll(!all)} className="w-full border-t border-white/[0.05] py-1.5 text-center text-2xs text-ink-subtle hover:text-ink">
+          {all ? 'Show fewer' : `Show all ${sorted.length} clips`}
+        </button>
+      )}
       {error && <p role="alert" className="px-3 py-1.5 text-2xs text-warning">{error}</p>}
       {playing && <ClipPlayerDialog filePath={playing.clipPath} title={playing.title} vertical={vertical} onClose={() => setPlaying(null)} />}
     </div>

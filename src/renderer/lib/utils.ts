@@ -87,6 +87,23 @@ export function formatRelativeDate(isoString: string): string {
   })
 }
 
+/** A clock time in the app's format, e.g. "2:27 PM". */
+export function formatClockTime(isoString: string): string {
+  return new Date(isoString).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })
+}
+
+/** "Today", "Yesterday" or a short date, e.g. "Sun, Sep 27" (with the year when not this year). */
+export function formatDayLabel(isoString: string): string {
+  const date = new Date(isoString)
+  const now = new Date()
+  const startOfDay = (d: Date): number => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
+  const days = Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000)
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
+  return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric',
+    ...(date.getFullYear() !== now.getFullYear() && { year: 'numeric' }) })
+}
+
 export function isUrl(value: string): boolean {
   return /^https?:\/\//i.test(value.trim())
 }

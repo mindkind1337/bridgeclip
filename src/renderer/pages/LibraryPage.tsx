@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronDown, Clapperboard, FileText, FolderOpen, LayoutGrid, List, ListVideo, Radio, RefreshCw, Search, Sparkles } from 'lucide-react'
 import { getApi } from '../lib/ipc'
-import { cn, errorMessage, formatRelativeDate, formatUsd, localFileUrl } from '../lib/utils'
+import { cn, errorMessage, formatClockTime, formatDayLabel, formatRelativeDate, formatUsd, localFileUrl } from '../lib/utils'
 import { clipFilePath, loadThumbnail } from '../lib/thumbnails'
 import { useSettingsStore } from '../store/use-settings-store'
 import type { JobOutput } from '../store/use-job-store'
@@ -16,48 +16,52 @@ import { EmptyState } from '../components/ui/EmptyState'
 import { Callout } from '../components/ui/Callout'
 import { Skeleton } from '../components/ui/Skeleton'
 import { Segmented } from '../components/ui/Segmented'
-import { Switch } from '../components/ui/Switch'
 import { TranscriptDialog } from '../components/TranscriptDialog'
 import { LiveClipsTable } from '../components/LiveClipsTable'
+import { LivePlatformIcon } from '../components/LivePlatformIcon'
 import { groupLibraryByLive, type LibraryLive } from '../../shared/live'
 import type { Page as AppPage } from '../components/Sidebar'
 
-type LibraryView = 'grid' | 'details'
+/** Lives: channels, their lives and each live's best clips. Grid / List: every run, newest first. */
+type LibraryView = 'lives' | 'grid' | 'list'
 const VIEW_STORAGE_KEY = 'bridgeclip.library.view'
-const GROUP_STORAGE_KEY = 'bridgeclip.library.groupLives'
-
-function savedGrouping(): boolean {
-  try { return localStorage.getItem(GROUP_STORAGE_KEY) !== 'off' } catch { return true }
-}
-
-const DAY = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
-const HOUR = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
-
-function liveLabel(live: LibraryLive<HistoryEntry>): string {
-  const start = live.streamStartedAt ?? live.firstRecordedAt
-  const date = new Date(start)
-  const today = new Date().toDateString() === date.toDateString()
-  return `${today ? 'Today' : DAY.format(date)} · ${live.streamStartedAt ? `live since ${HOUR.format(date)}` : `recorded from ${HOUR.format(date)}`}`
-}
 
 function savedView(): LibraryView {
-  try { return localStorage.getItem(VIEW_STORAGE_KEY) === 'details' ? 'details' : 'grid' } catch { return 'grid' }
+  try {
+    const value = localStorage.getItem(VIEW_STORAGE_KEY)
+    return value === 'grid' || value === 'list' ? value : value === 'details' ? 'list' : 'lives'
+  } catch { return 'lives' }
+}
+
+const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? '' : 's'}`
+
+/** "Sun, Sep 27 · live since 1:37 PM" (or "recorded from" when the broadcast start is unknown). */
+function liveTitle(live: LibraryLive<HistoryEntry>): string {
+  const start = live.streamStartedAt ?? live.firstRecordedAt
+  return `${formatDayLabel(start)} · ${live.streamStartedAt ? 'live since' : 'recorded from'} ${formatClockTime(start)}`
+}
+
+/** When recording ran, first part to last. */
+function liveSpan(live: LibraryLive<HistoryEntry>): string {
+  const last = live.entries.reduce((latest, entry) => (entry.date > latest ? entry.date : latest), live.entries[0].date)
+  return `recorded ${formatClockTime(live.firstRecordedAt)} – ${formatClockTime(last)}`
 }
 
 export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => void }): React.JSX.Element {
   const [view, setView] = useState<LibraryView>(savedView)
-  const [grouped, setGrouped] = useState(savedGrouping)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
-  // Per live: its clips at a glance (default) or its parts.
-  const [liveViews, setLiveViews] = useState<Record<string, 'clips' | 'parts'>>({})
+  // Per live: its best clips (default) or its parts.
+  const [showParts, setShowParts] = useState<Set<string>>(new Set())
   const [liveTranscript, setLiveTranscript] = useState<{ outputDir: string; output: JobOutput } | null>(null)
-  const chooseGrouping = (next: boolean): void => {
-    setGrouped(next)
-    try { localStorage.setItem(GROUP_STORAGE_KEY, next ? 'on' : 'off') } catch { /* A remembered choice is a convenience only. */ }
-  }
   const chooseView = (next: LibraryView): void => {
     setView(next)
     try { localStorage.setItem(VIEW_STORAGE_KEY, next) } catch { /* A remembered view is a convenience only. */ }
+  }
+  const toggle = (set: Set<string>, key: string): Set<string> => {
+    const next = new Set(set)
+    if (next.has(key)) next.delete(key)
+    else next.add(key)
+    return next
   }
   const outputDirectory = useSettingsStore((s) => s.outputDirectory)
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null)
@@ -92,7 +96,7 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
   const filtered = useMemo(() => {
     if (!entries) return []
     const q = query.trim().toLowerCase()
-    return q ? entries.filter((e) => e.videoTitle.toLowerCase().includes(q)) : entries
+    return q ? entries.filter((e) => e.videoTitle.toLowerCase().includes(q) || e.live?.channel.toLowerCase().includes(q)) : entries
   }, [entries, query])
 
   const totalClips = entries?.reduce((sum, e) => sum + e.clipCount, 0) ?? 0
@@ -127,21 +131,6 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
     }
   }
 
-  /** Parts of one live are labeled by their order in it; other runs keep their title. */
-  const renderRuns = (list: HistoryEntry[], labels?: Map<string, string>): React.JSX.Element => view === 'details' ? (
-    <div className="glass overflow-hidden rounded-2xl" role="list" aria-label="Runs">
-      {list.map((entry) => (
-        <RunRow key={entry.jobId} entry={entry} label={labels?.get(entry.jobId)} onOpen={() => openRun(entry)} onOpenFolder={() => void openFolder(entry)} />
-      ))}
-    </div>
-  ) : (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
-      {list.map((entry) => (
-        <RunCard key={entry.jobId} entry={entry} label={labels?.get(entry.jobId)} onOpen={() => openRun(entry)} onOpenFolder={() => void openFolder(entry)} />
-      ))}
-    </div>
-  )
-
   const openLiveTranscript = async (live: LibraryLive<HistoryEntry>): Promise<void> => {
     const last = live.entries[live.entries.length - 1]
     try {
@@ -153,48 +142,69 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
     }
   }
 
-  const renderGroups = (): React.JSX.Element => {
+  const runGrid = (list: HistoryEntry[]): React.JSX.Element => (
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
+      {list.map((entry) => (
+        <RunCard key={entry.jobId} entry={entry} onOpen={() => openRun(entry)} onOpenFolder={() => void openFolder(entry)} />
+      ))}
+    </div>
+  )
+
+  const runList = (list: HistoryEntry[], labels?: Map<string, string>): React.JSX.Element => (
+    <div className="glass overflow-hidden rounded-2xl" role="list" aria-label="Runs">
+      {list.map((entry) => (
+        <RunRow key={entry.jobId} entry={entry} label={labels?.get(entry.jobId)} onOpen={() => openRun(entry)} onOpenFolder={() => void openFolder(entry)} />
+      ))}
+    </div>
+  )
+
+  const renderLives = (): React.JSX.Element => {
     const { channels, others } = groupLibraryByLive(filtered)
     return (
-      <div className="space-y-8">
+      <div className="space-y-10">
         {channels.map((channel) => (
           <section key={channel.channel} aria-label={channel.channel}>
-            <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-ink">
-              <Radio aria-hidden className="h-4 w-4 text-danger" />{channel.channel}
-              <span className="text-xs font-normal text-ink-subtle">
-                {channel.lives.length} live{channel.lives.length === 1 ? '' : 's'} · {channel.lives.reduce((sum, live) => sum + live.entries.reduce((n, e) => n + e.clipCount, 0), 0)} clips
-              </span>
+            <h2 className="mb-3 flex items-center gap-2.5 text-base font-semibold text-ink">
+              <LivePlatformIcon platform={channel.platform} size="sm" />
+              {channel.channel}
+              <span className="text-xs font-normal text-ink-subtle">{plural(channel.lives.length, 'live')}</span>
             </h2>
             <div className="space-y-4">
               {channel.lives.map((live) => {
                 const clips = live.entries.reduce((sum, entry) => sum + entry.clipCount, 0)
                 const cost = live.entries.reduce((sum, entry) => sum + (entry.totalCostUsd ?? 0), 0)
                 const isCollapsed = collapsed.has(live.key)
-                const labels = new Map(live.entries.map((entry, index) =>
-                  [entry.jobId, `Part ${index + 1} · recorded ${HOUR.format(new Date(entry.live!.recordedAt))}${entry.live!.part !== index + 1 ? ` (session part ${entry.live!.part})` : ''}`]))
+                const parts = showParts.has(live.key)
+                const labels = new Map(live.entries.map((entry, index) => [entry.jobId, `Part ${index + 1} · ${formatClockTime(entry.date)}`]))
                 return (
-                  <div key={live.key} className="rounded-2xl border border-white/[0.06] p-2">
-                    <div className="flex flex-wrap items-center gap-2 px-1.5 pb-2">
-                      <button type="button" aria-expanded={!isCollapsed} onClick={() => setCollapsed((current) => {
-                        const next = new Set(current); if (next.has(live.key)) next.delete(live.key); else next.add(live.key); return next
-                      })} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-                        <ChevronDown aria-hidden className={cn('h-4 w-4 shrink-0 text-ink-subtle transition-transform', isCollapsed && '-rotate-90')} />
-                        <span className="text-sm font-medium text-ink">{liveLabel(live)}</span>
-                        <span className="text-xs text-ink-subtle">
-                          {live.entries.length} part{live.entries.length === 1 ? '' : 's'} · {clips} clip{clips === 1 ? '' : 's'}{cost > 0 ? ` · ${formatUsd(cost)}` : ''}
+                  <article key={live.key} className="glass rounded-2xl p-3" aria-label={liveTitle(live)}>
+                    <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                      <button type="button" aria-expanded={!isCollapsed} onClick={() => setCollapsed((current) => toggle(current, live.key))}
+                        className="flex min-w-0 flex-1 items-start gap-2 text-left">
+                        <ChevronDown aria-hidden className={cn('mt-0.5 h-4 w-4 shrink-0 text-ink-subtle transition-transform', isCollapsed && '-rotate-90')} />
+                        <span className="min-w-0">
+                          <span className="block text-sm font-semibold text-ink">{liveTitle(live)}</span>
+                          <span className="block text-xs text-ink-subtle">
+                            {liveSpan(live)} · {plural(live.entries.length, 'part')} · {plural(clips, 'clip')}{cost > 0 ? ` · ${formatUsd(cost)}` : ''}
+                          </span>
                         </span>
                       </button>
-                      <Segmented size="sm" label="Show" value={liveViews[live.key] ?? 'clips'}
-                        onChange={(value) => setLiveViews((current) => ({ ...current, [live.key]: value }))}
-                        options={[{ value: 'clips', label: 'Clips' }, { value: 'parts', label: 'Parts' }]} />
-                      <Button size="sm" variant="ghost" icon={<FileText className="h-3.5 w-3.5" />} onClick={() => void openLiveTranscript(live)}>
-                        Transcript
-                      </Button>
-                    </div>
-                    {!isCollapsed && ((liveViews[live.key] ?? 'clips') === 'clips'
-                      ? <LiveClipsTable runDirs={live.entries.map((entry) => entry.outputDir)} />
-                      : renderRuns(live.entries, labels))}
-                  </div>
+                      <div className="flex items-center gap-1">
+                        <Button size="sm" variant="ghost" icon={<FileText className="h-3.5 w-3.5" />} onClick={() => void openLiveTranscript(live)}>
+                          Transcript
+                        </Button>
+                        <Button size="sm" variant={parts ? 'secondary' : 'ghost'} icon={<List className="h-3.5 w-3.5" />}
+                          aria-pressed={parts} onClick={() => setShowParts((current) => toggle(current, live.key))}>
+                          Parts
+                        </Button>
+                      </div>
+                    </header>
+                    {!isCollapsed && (
+                      <div className="mt-3">
+                        {parts ? runList(live.entries, labels) : <LiveClipsTable runDirs={live.entries.map((entry) => entry.outputDir)} limit={8} />}
+                      </div>
+                    )}
+                  </article>
                 )
               })}
             </div>
@@ -202,8 +212,14 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
         ))}
         {others.length > 0 && (
           <section aria-label="Other videos">
-            {channels.length > 0 && <h2 className="mb-2 text-sm font-semibold text-ink">Other videos</h2>}
-            {renderRuns(others)}
+            {channels.length > 0 && (
+              <h2 className="mb-3 flex items-center gap-2.5 text-base font-semibold text-ink">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.06] text-ink-muted"><Clapperboard className="h-3 w-3" /></span>
+                Other videos
+                <span className="text-xs font-normal text-ink-subtle">{plural(others.length, 'video')}</span>
+              </h2>
+            )}
+            {runGrid(others)}
           </section>
         )}
       </div>
@@ -228,7 +244,7 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
         title="Library"
         description={
           entries && entries.length > 0
-            ? `${entries.length} run${entries.length === 1 ? '' : 's'} · ${totalClips} clips`
+            ? `${plural(entries.length, 'run')} · ${plural(totalClips, 'clip')}`
             : 'Every run you finish lands here.'
         }
         actions={
@@ -261,33 +277,30 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
       )}
 
       {entries && entries.length > 0 && (
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
           <TextInput
             className="max-w-sm flex-1 rounded-full"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by video title"
+            placeholder="Search videos and channels"
             leading={<Search className="h-3.5 w-3.5" />}
-            aria-label="Search runs"
+            aria-label="Search the library"
           />
-          <label className="flex items-center gap-2 text-xs text-ink-muted">
-            <Switch checked={grouped} onChange={chooseGrouping} label="Group lives" />
-            Group lives
-          </label>
           <Segmented
             size="sm"
             label="Library view"
             value={view}
             onChange={chooseView}
             options={[
+              { value: 'lives', label: <span className="flex items-center gap-1.5"><Radio className="h-3.5 w-3.5" />Lives</span> },
               { value: 'grid', label: <span className="flex items-center gap-1.5"><LayoutGrid className="h-3.5 w-3.5" />Grid</span> },
-              { value: 'details', label: <span className="flex items-center gap-1.5"><List className="h-3.5 w-3.5" />Details</span> }
+              { value: 'list', label: <span className="flex items-center gap-1.5"><List className="h-3.5 w-3.5" />List</span> }
             ]}
           />
         </div>
       )}
 
-      <div className="mt-4">
+      <div className="mt-5">
         {entries === null ? (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4" aria-busy="true" aria-label="Loading library">
             {Array.from({ length: 6 }).map((_, i) => (
@@ -314,9 +327,9 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
         ) : filtered.length === 0 ? (
           <div className="glass flex flex-col items-center rounded-3xl px-5 py-10 text-center">
             <Search className="h-5 w-5 text-ink-subtle" />
-            <p className="mt-3 text-sm text-ink-muted">No runs match “{query}”.</p>
+            <p className="mt-3 text-sm text-ink-muted">Nothing matches “{query}”.</p>
           </div>
-        ) : grouped ? renderGroups() : renderRuns(filtered)}
+        ) : view === 'lives' ? renderLives() : view === 'list' ? runList(filtered) : runGrid(filtered)}
       </div>
       {liveTranscript && (
         <TranscriptDialog outputDir={liveTranscript.outputDir} output={liveTranscript.output} initialScope="live" onClose={() => setLiveTranscript(null)} />

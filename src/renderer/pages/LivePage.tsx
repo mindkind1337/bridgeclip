@@ -52,7 +52,7 @@ function inputFor(channel: LiveChannel): LiveChannelInput {
     maxPostsPerHour, chunkMinutes, chatPriority: chatPriority === true }
 }
 
-const HOUR = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+const HOUR = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
 
 function missedLabel(ms: number): string {
   const minutes = Math.round(ms / 60_000)
@@ -311,8 +311,8 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
  * Clips of this channel's current live (or today), read from the library so they
  * survive restarts: play them here, or open the replay at their moment.
  */
-const WHEN = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-const AT = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
+const WHEN = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+const AT = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' })
 
 function spanLabel(ms: number): string {
   const minutes = Math.max(0, Math.round(ms / 60_000))
@@ -398,7 +398,7 @@ function ChannelClips({ channel, live, ended, refreshKey }: {
   )
 }
 
-const TIME = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+const TIME = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' })
 
 /** What the live engine did, newest first: the last few lines, or everything on demand. */
 function ActivityLog({ entries, live }: { entries: LiveActivity[]; live: boolean }): React.JSX.Element {
