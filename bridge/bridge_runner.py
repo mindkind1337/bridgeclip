@@ -157,10 +157,8 @@ def progress_callback(progress) -> None:
     })
 
 
-async def run(config: dict) -> bool:
-    """Run the clipping pipeline with the given config."""
-    config = validate_config(config)
-    # Configure before BridgeClip imports: settings are cached by the engine.
+def configure_environment(config: dict) -> None:
+    """Configure the engine before it is imported: its settings are cached."""
     os.environ["LOCAL_MODE"] = "true"
     if config.get("output_dir"):
         os.environ["LOCAL_OUTPUT_DIR"] = config["output_dir"]
@@ -185,6 +183,42 @@ async def run(config: dict) -> bool:
         for name in ("planner_input_price", "planner_output_price"):
             if config.get(name) is not None:
                 os.environ[name.upper()] = str(config[name])
+
+
+def caption_style_for(config: dict, get_caption_preset):
+    """The configured caption preset, "pop" when unknown, None when captions are off."""
+    caption_style = None
+    preset_name = config.get("caption_preset", "pop")
+    if config.get("include_captions", True):
+        try:
+            caption_style = get_caption_preset(preset_name)
+        except ValueError:
+            try:
+                caption_style = get_caption_preset("pop")
+            except ValueError:
+                pass
+    return caption_style
+
+
+def failure_payload(result) -> dict:
+    """Safe message, hint and bounded diagnostics for a failed pipeline result."""
+    failure_code = getattr(result, "failure_code", None)
+    failure_stage = getattr(result, "failure_stage", None)
+    http_status = getattr(result, "http_status", None)
+    diagnostic = {}
+    if isinstance(failure_code, str) and re.fullmatch(r"[a-z]+(?:[._][a-z]+)*", failure_code) and len(failure_code) <= 64:
+        diagnostic["code"] = failure_code
+    if failure_stage in {"setup", "download", "transcription", "planning", "rendering", "saving", "uploading"}:
+        diagnostic["stage"] = failure_stage
+    if type(http_status) is int and 100 <= http_status <= 599:
+        diagnostic["http_status"] = http_status
+    return {**describe_failure(result.error), **diagnostic}
+
+
+async def run(config: dict) -> bool:
+    """Run the clipping pipeline with the given config."""
+    config = validate_config(config)
+    configure_environment(config)
 
     from network_guard import install as install_network_guard
     install_network_guard()
@@ -213,16 +247,7 @@ async def run(config: dict) -> bool:
         emit({"type": "error", "message": f"Missing required API keys: {', '.join(missing)}"})
         return False
 
-    caption_style = None
-    preset_name = config.get("caption_preset", "pop")
-    if config.get("include_captions", True):
-        try:
-            caption_style = get_caption_preset(preset_name)
-        except ValueError:
-            try:
-                caption_style = get_caption_preset("pop")
-            except ValueError:
-                pass
+    caption_style = caption_style_for(config, get_caption_preset)
 
     duration_ranges = config.get("duration_ranges")
 
@@ -274,17 +299,7 @@ async def run(config: dict) -> bool:
             "output": output_data,
         })
         return True
-    failure_code = getattr(result, "failure_code", None)
-    failure_stage = getattr(result, "failure_stage", None)
-    http_status = getattr(result, "http_status", None)
-    diagnostic = {}
-    if isinstance(failure_code, str) and re.fullmatch(r"[a-z]+(?:[._][a-z]+)*", failure_code) and len(failure_code) <= 64:
-        diagnostic["code"] = failure_code
-    if failure_stage in {"setup", "download", "transcription", "planning", "rendering", "saving", "uploading"}:
-        diagnostic["stage"] = failure_stage
-    if type(http_status) is int and 100 <= http_status <= 599:
-        diagnostic["http_status"] = http_status
-    emit({"type": "error", **describe_failure(result.error), **diagnostic})
+    emit({"type": "error", **failure_payload(result)})
     return False
 
 
