@@ -514,3 +514,39 @@ async function readRunChat(runDir: string, libraryDir: string): Promise<{ t: num
 function chatReactionOf(found: { count: number; ratio: number; reaction: string | null } | null): LiveChannelClip['chatReaction'] {
   return found ? { count: found.count, ratio: found.ratio, reaction: found.reaction } : null
 }
+
+const MAX_LIVE_RUNS = 200
+
+/**
+ * Every clip of the given runs (the parts of one live, in order), with the
+ * part's place in the live, time into the stream, replay availability and the
+ * chat spike each clip caused. Runs outside the library are skipped.
+ */
+export async function getRunsClips(runDirs: unknown, libraryDir: string): Promise<LiveChannelClip[]> {
+  if (!Array.isArray(runDirs)) return []
+  const clips: LiveChannelClip[] = []
+  for (const [index, runDir] of runDirs.slice(0, MAX_LIVE_RUNS).entries()) {
+    if (typeof runDir !== 'string' || !isAbsolute(runDir)) continue
+    const inside = relative(resolve(libraryDir), resolve(runDir))
+    if (!inside || isAbsolute(inside) || inside.startsWith('..')) continue
+    const read = await readJobOutput(join(runDir, 'job_output.json'), libraryDir).catch(() => null)
+    if (!read) continue
+    const info = await readPartInfo(runDir, libraryDir)
+    const chat = chatActivity(await readRunChat(runDir, libraryDir))
+    for (const clip of read.data.clips) {
+      const path = clip.s3_url.startsWith('file://') ? clip.s3_url.slice('file://'.length) : clip.s3_url
+      const within = relative(runDir, path)
+      if (!within || isAbsolute(within) || within.startsWith('..')) continue
+      const startSeconds = clip.start_time_ms / 1000
+      clips.push({
+        runDir, clipPath: path, clipIndex: clip.clip_index, title: clip.summary || `Clip ${clip.clip_index + 1}`,
+        score: clip.virality_score, part: index + 1, startSeconds, durationMs: clip.duration_ms,
+        intoStream: info ? secondsIntoStream(info, startSeconds) : null,
+        hasReplay: Boolean(info?.replayUrl && info.timeline?.length && info.streamStartedAt),
+        recordedAt: read.modified.toISOString(),
+        chatReaction: chatReactionOf(clipChatReaction(chat, startSeconds, clip.end_time_ms / 1000))
+      })
+    }
+  }
+  return clips
+}

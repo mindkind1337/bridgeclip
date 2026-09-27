@@ -18,6 +18,7 @@ import { Skeleton } from '../components/ui/Skeleton'
 import { Segmented } from '../components/ui/Segmented'
 import { Switch } from '../components/ui/Switch'
 import { TranscriptDialog } from '../components/TranscriptDialog'
+import { LiveClipsTable } from '../components/LiveClipsTable'
 import { groupLibraryByLive, type LibraryLive } from '../../shared/live'
 import type { Page as AppPage } from '../components/Sidebar'
 
@@ -47,6 +48,8 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
   const [view, setView] = useState<LibraryView>(savedView)
   const [grouped, setGrouped] = useState(savedGrouping)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
+  // Per live: its clips at a glance (default) or its parts.
+  const [liveViews, setLiveViews] = useState<Record<string, 'clips' | 'parts'>>({})
   const [liveTranscript, setLiveTranscript] = useState<{ outputDir: string; output: JobOutput } | null>(null)
   const chooseGrouping = (next: boolean): void => {
     setGrouped(next)
@@ -181,11 +184,16 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
                           {live.entries.length} part{live.entries.length === 1 ? '' : 's'} · {clips} clip{clips === 1 ? '' : 's'}{cost > 0 ? ` · ${formatUsd(cost)}` : ''}
                         </span>
                       </button>
+                      <Segmented size="sm" label="Show" value={liveViews[live.key] ?? 'clips'}
+                        onChange={(value) => setLiveViews((current) => ({ ...current, [live.key]: value }))}
+                        options={[{ value: 'clips', label: 'Clips' }, { value: 'parts', label: 'Parts' }]} />
                       <Button size="sm" variant="ghost" icon={<FileText className="h-3.5 w-3.5" />} onClick={() => void openLiveTranscript(live)}>
                         Transcript
                       </Button>
                     </div>
-                    {!isCollapsed && renderRuns(live.entries, labels)}
+                    {!isCollapsed && ((liveViews[live.key] ?? 'clips') === 'clips'
+                      ? <LiveClipsTable runDirs={live.entries.map((entry) => entry.outputDir)} />
+                      : renderRuns(live.entries, labels))}
                   </div>
                 )
               })}

@@ -3,7 +3,7 @@ import { existsSync, realpathSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
-import { ensureOutputDir, getChannelClips, getJobHistory, getJobOutput, getLivePartInfo, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
+import { ensureOutputDir, getChannelClips, getJobHistory, getRunsClips, getJobOutput, getLivePartInfo, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
 import { isReplayUrl, replayLinkAt, secondsIntoStream } from '../shared/live'
 import {
   getEnginePath,
@@ -286,6 +286,8 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
     return getLiveTranscript(outputDir, library)
   })
+
+  handle('history:liveClips', (_event, runDirs: unknown) => getRunsClips(runDirs, loadSettings().outputDirectory))
 
   handle('history:liveInfo', (_event, outputDir: unknown) => {
     assertAbsolutePath(outputDir)

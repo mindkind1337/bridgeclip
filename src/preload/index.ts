@@ -153,6 +153,8 @@ export interface BridgeClipAPI {
     exportLiveTranscript: (outputDir: string) => Promise<string | null>
     /** Where a live part sits in its broadcast and its replay page; null for other runs. */
     liveInfo: (outputDir: string) => Promise<LivePartInfo | null>
+    /** Every clip of these runs (parts of one live, in order), with score, chat spike and replay details. */
+    liveClips: (runDirs: string[]) => Promise<LiveChannelClip[]>
   }
   thumbnails: {
     generate: (videoPath: string, seekSeconds?: number) => Promise<string | null>
@@ -273,7 +275,8 @@ const api: BridgeClipAPI = {
     transcript: (outputDir) => ipcRenderer.invoke('history:transcript', outputDir),
     liveTranscript: (outputDir) => ipcRenderer.invoke('history:liveTranscript', outputDir),
     exportLiveTranscript: (outputDir) => ipcRenderer.invoke('history:exportLiveTranscript', outputDir),
-    liveInfo: (outputDir) => ipcRenderer.invoke('history:liveInfo', outputDir)
+    liveInfo: (outputDir) => ipcRenderer.invoke('history:liveInfo', outputDir),
+    liveClips: (runDirs) => ipcRenderer.invoke('history:liveClips', runDirs)
   },
   thumbnails: {
     generate: (videoPath, seekSeconds) => ipcRenderer.invoke('thumbnails:generate', videoPath, seekSeconds)
