@@ -106,7 +106,8 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
     const label = `${streamClock(into)} into the live`
     if (!liveInfo.replayUrl) return { label }
     return {
-      label: `Watch at ${streamClock(into)} on ${PLATFORM_NAMES[liveInfo.platform]}`,
+      // Kick opens its list of broadcasts: the time is where to go in it.
+      label: liveInfo.platform === 'kick' ? `Kick replays · go to ${streamClock(into)}` : `Watch at ${streamClock(into)} on ${PLATFORM_NAMES[liveInfo.platform]}`,
       onOpen: () => {
         setReplayError(null)
         void getApi().live.openReplay(outputDir, clip.start_time_ms / 1000).catch((cause) => setReplayError(errorMessage(cause, 'Could not open the replay.')))

@@ -696,8 +696,9 @@ def resolve_replay(channel: "LiveChannel", stream: "LiveStream", now: Optional[f
 
     YouTube keeps the live at its watch URL. Twitch archives the broadcast as the
     channel's newest video while it runs (when VODs are enabled); it is accepted
-    only if its length matches the time since the stream began. Kick lists the
-    running broadcast among the channel's videos.
+    only if its length matches the time since the stream began. Kick's video
+    pages could not be opened by a direct link (even for finished broadcasts),
+    so for Kick this is the channel's list of past broadcasts.
     """
     import json
 
@@ -709,6 +710,8 @@ def resolve_replay(channel: "LiveChannel", stream: "LiveStream", now: Optional[f
     if channel.platform == "youtube":
         return f"https://www.youtube.com/watch?v={stream.broadcast_id}" if stream.broadcast_id and re.fullmatch(r"[\w-]{11}", stream.broadcast_id) else None
     name = channel.url.rstrip("/").rsplit("/", 1)[-1]
+    if channel.platform == "kick":
+        return f"https://kick.com/{name}/videos"
     now = time.time() if now is None else now
     options = {"quiet": True, "no_warnings": True, "proxy": "", "extract_flat": True, "playlistend": 3}
     with guarded_public_connections(), yt_dlp.YoutubeDL(options) as ydl:

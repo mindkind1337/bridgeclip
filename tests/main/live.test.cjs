@@ -512,7 +512,9 @@ test('replay links use exact broadcast time and only known replay pages', () => 
   const { isReplayUrl, replayLinkAt, secondsIntoStream, broadcastTime } = shared()
   assert.ok(isReplayUrl('https://www.twitch.tv/videos/2885452707', 'twitch'))
   assert.ok(isReplayUrl('https://www.youtube.com/watch?v=HvZt-nh9sGg', 'youtube'))
-  assert.ok(isReplayUrl('https://kick.com/asmongold/videos/2cf5cde0-a637-4a02-992d-77a968941162', 'kick'))
+  assert.ok(isReplayUrl('https://kick.com/asmongold/videos', 'kick'))
+  assert.equal(isReplayUrl('https://kick.com/asmongold/videos/2cf5cde0-a637-4a02-992d-77a968941162', 'kick'), false, 'those pages do not open')
+  assert.equal(replayLinkAt('https://kick.com/asmongold/videos', 'kick', 600), 'https://kick.com/asmongold/videos')
   for (const [url, platform] of [['https://evil.test/videos/1', 'twitch'], ['https://www.twitch.tv/videos/1?x=javascript:', 'twitch'],
     ['https://www.youtube.com/watch?v=HvZt-nh9sGg', 'twitch'], ['http://www.twitch.tv/videos/1', 'twitch'], [42, 'kick']]) {
     assert.equal(isReplayUrl(url, platform), false, String(url))

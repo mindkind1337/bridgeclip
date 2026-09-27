@@ -62,7 +62,8 @@ export interface LivePartInfo {
 const REPLAY_PATTERNS: Record<LivePlatform, RegExp> = {
   youtube: /^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{11}$/,
   twitch: /^https:\/\/www\.twitch\.tv\/videos\/\d{1,20}$/,
-  kick: /^https:\/\/kick\.com\/[A-Za-z0-9_-]{2,40}\/videos\/[0-9a-f-]{36}$/
+  // Kick: the channel's past broadcasts (its video pages do not open by direct link).
+  kick: /^https:\/\/kick\.com\/[A-Za-z0-9_-]{2,40}\/videos$/
 }
 
 export function isReplayUrl(value: unknown, platform: LivePlatform): value is string {
@@ -94,7 +95,7 @@ export function replayLinkAt(url: string, platform: LivePlatform, seconds: numbe
   const whole = Math.max(0, Math.floor(seconds))
   if (platform === 'youtube') return `${url}&t=${whole}s`
   if (platform === 'twitch') return `${url}?t=${Math.floor(whole / 3600)}h${Math.floor((whole % 3600) / 60)}m${whole % 60}s`
-  return `${url}?t=${whole}`
+  return url // Kick's list of broadcasts: no time in the link; the app shows the time to seek to
 }
 
 export function streamClock(seconds: number): string {
