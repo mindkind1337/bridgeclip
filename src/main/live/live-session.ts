@@ -74,6 +74,8 @@ export class LiveSession {
       contract_version: BRIDGE_CONTRACT_VERSION,
       mode: 'record',
       session_id: this.sessionId,
+      // The engine quits by itself if BridgeClip disappears without stopping it.
+      parent_pid: process.pid,
       channel_url: this.channel.url,
       chunk_seconds: this.channel.chunkMinutes * 60,
       overlap_seconds: LIVE_OVERLAP_SECONDS,

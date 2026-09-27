@@ -1,5 +1,6 @@
 import asyncio
 import io
+import subprocess
 import json
 import os
 import sys
@@ -183,13 +184,29 @@ class LiveRunnerTests(unittest.TestCase):
             self.spec(chunk_seconds=30), self.spec(overlap_seconds=400), self.spec(chunk_seconds=120, overlap_seconds=60),
             self.spec(max_clips_per_chunk=0), self.spec(clip={"layout_vision_enabled": False, "max_clips": 3}),
             self.spec(clip={"layout_vision_enabled": False, "aspect_ratio": "1:1"}),
-            self.spec(channel_url="file:///etc/passwd"),
+            self.spec(channel_url="file:///etc/passwd"), self.spec(parent_pid="1"), self.spec(parent_pid=0),
             {"contract_version": 2, "mode": "probe", "channels": []},
             {"contract_version": 2, "mode": "probe", "channels": ["x"] * 51},
         ]
         for spec in bad:
             with self.subTest(spec=spec), self.assertRaises(ValueError):
                 live.validate_spec(spec)
+
+    def test_an_orphaned_engine_quits(self):
+        stop = threading.Event()
+        orphaned = threading.Event()
+        with patch.object(live, "process_alive", side_effect=lambda pid: pid != 999):
+            watcher = threading.Thread(target=live.watch_stop_file, args=(os.path.join(self.tmp.name, "stop"), stop, 0.01, 999),
+                                       kwargs={"on_orphaned": orphaned.set})
+            watcher.start()
+            watcher.join(2)
+        self.assertTrue(orphaned.is_set())
+        self.assertFalse(stop.is_set(), "no graceful flush: nobody would receive the clips")
+
+    def test_process_alive_sees_this_process_and_not_a_dead_one(self):
+        self.assertTrue(live.process_alive(os.getpid()))
+        done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True)
+        self.assertFalse(live.process_alive(int(done.stdout)))
 
     def test_stop_file_sets_the_stop_event(self):
         stop = threading.Event()

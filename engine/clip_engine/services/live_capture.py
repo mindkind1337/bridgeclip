@@ -360,7 +360,8 @@ class HlsCapture:
                  stop_event: Optional[threading.Event] = None,
                  offline_polls: int = 3,
                  max_session_seconds: float = MAX_SESSION_SECONDS,
-                 on_status: Callable[[str], None] = lambda status: None):
+                 on_status: Callable[[str], None] = lambda status: None,
+                 on_progress: Callable[[int, float, float, int, int], None] = lambda *progress: None):
         if not 60 <= chunk_seconds <= 3600 or not 0 <= overlap_seconds < chunk_seconds / 2:
             raise ValueError("Invalid chunk settings")
         self.channel = channel
@@ -376,6 +377,7 @@ class HlsCapture:
         self.offline_polls = offline_polls
         self.max_session_seconds = max_session_seconds
         self.on_status = on_status
+        self.on_progress = on_progress
         self.segments_dir = os.path.join(work_dir, "segments")
         self.stream: Optional[LiveStream] = None
         self.started = time.localtime()
@@ -456,6 +458,9 @@ class HlsCapture:
                     self._record(segment, audio_segment)
                     if sum(item.duration for item in self.current) >= self.chunk_seconds:
                         self._flush(final=False)
+                # Part being recorded, its new content so far and its target length.
+                self.on_progress(self.part + 1, sum(item.duration for item in self.current), self.chunk_seconds,
+                                 self.gaps, self.skipped_ads)
                 if playlist.ended:
                     self._flush(final=True)
                     return "ended"

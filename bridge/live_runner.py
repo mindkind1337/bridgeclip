@@ -64,6 +64,9 @@ def validate_spec(spec: object) -> dict:
     session = spec.get("session_id")
     if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", session):
         raise ValueError("A valid session_id is required")
+    parent = spec.get("parent_pid")
+    if parent is not None and (type(parent) is not int or parent <= 0):
+        raise ValueError("Invalid parent_pid")
     for field, low, high in (("chunk_seconds", 60, 3600), ("overlap_seconds", 0, 300), ("max_clips_per_chunk", 1, 10)):
         if type(spec.get(field)) is not int or not low <= spec[field] <= high:
             raise ValueError(f"Invalid {field}")
@@ -92,13 +95,44 @@ def probe(spec: dict) -> bool:
 
 
 STOP_FILE = "stop"
+PROGRESS_INTERVAL_SECONDS = 5.0
 
 
-def watch_stop_file(path: str, stop: threading.Event, interval: float = 1.0) -> None:
-    """Stop gracefully once Electron creates the stop file."""
+def process_alive(pid: int) -> bool:
+    """Whether a process with this id still runs."""
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT: still running
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def watch_stop_file(path: str, stop: threading.Event, interval: float = 1.0, parent_pid: int | None = None,
+                    on_orphaned=lambda: os._exit(1)) -> None:
+    """Stop gracefully once Electron creates the stop file; quit at once if Electron is gone.
+
+    Without the app nobody receives the clips, and a restarted app starts its
+    own recording: an orphaned engine would record and spend twice.
+    """
     while not stop.wait(interval):
         if os.path.exists(path):
             stop.set()
+        elif parent_pid and not process_alive(parent_pid):
+            logger.error("BridgeClip closed; stopping the live engine")
+            on_orphaned()
+            return
 
 
 async def record(spec: dict) -> bool:
@@ -124,8 +158,17 @@ async def record(spec: dict) -> bool:
 
     chunks: "queue.Queue" = queue.Queue()
     stop = threading.Event()
-    threading.Thread(target=watch_stop_file, args=(os.path.join(work_dir, STOP_FILE), stop, spec.get("_stop_poll", 1.0)),
-                     name="live-stop", daemon=True).start()
+    threading.Thread(target=watch_stop_file, args=(os.path.join(work_dir, STOP_FILE), stop, spec.get("_stop_poll", 1.0),
+                                                    spec.get("parent_pid")), name="live-stop", daemon=True).start()
+    last_progress = [0.0]
+
+    def on_progress(part: int, recorded: float, target: float, gaps: int, ads: int) -> None:
+        now = time.monotonic()
+        if now - last_progress[0] < PROGRESS_INTERVAL_SECONDS:
+            return
+        last_progress[0] = now
+        bridge.emit({"type": "progress", "part": part, "recorded_s": round(recorded, 1), "part_s": target,
+                     "gaps": gaps, "ads": ads})
     outcome: dict = {}
 
     def capture_main() -> None:
@@ -133,6 +176,7 @@ async def record(spec: dict) -> bool:
             channel, work_dir, chunks.put,
             chunk_seconds=spec["chunk_seconds"], overlap_seconds=spec["overlap_seconds"],
             stop_event=stop, on_status=lambda status: bridge.emit({"type": "status", "status": status}),
+            on_progress=on_progress,
             **spec.get("_capture_options", {}),
         )
         try:
