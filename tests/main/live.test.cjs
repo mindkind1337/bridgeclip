@@ -370,7 +370,7 @@ test('the activity log says what the engine is doing and why each clip was kept 
     const { session, spawned, library, states } = sessionHarness(dir)
     session.start()
     const { child } = spawned[0]
-    child.send({ type: 'status', status: 'recording' })
+    child.send({ type: 'status', status: 'recording', stream_started_at: Date.now() / 1000 - 2 * 3600 - 12 * 60 })
     child.send({ type: 'progress', part: 1, recorded_s: 10, part_s: 600, gaps: 0, ads: 3 })
     child.send({ type: 'progress', part: 1, recorded_s: 20, part_s: 600, gaps: 0, ads: 6 })
     child.send({ type: 'progress', part: 1, recorded_s: 40, part_s: 600, gaps: 2, ads: 6 })
@@ -390,17 +390,20 @@ test('the activity log says what the engine is doing and why each clip was kept 
     const lines = states.at(-1).activity.map((entry) => entry.text)
     assert.deepEqual(lines, [
       'Opening the stream',
-      'Live found: recording started',
+      lines[1],
       'Twitch ad break: the stream is not sent during ads, so this time is skipped',
       'Ad break over: recording the stream again',
       '2 stream segment(s) could not be downloaded and were lost',
-      'Part 1 recorded (10:00): clipping it now',
+      lines[5],
       'Part 1: Transcribing audio',
       'Part 1: Rendered 1 of 2 clips',
       'Part 1: 2 clips made',
       '“Moment 0” · score 90 · kept (no automation linked)',
       '“Moment 1” · score 40 · not posted: score below 70'
     ])
+    assert.match(lines[1], /^Live since .+ \(2 h 12 min ago\): recording from now on, the first 2 h 12 min are not recorded$/)
+    assert.match(lines[5], /^Part 1 recorded \(10:00\) · about 2:12:0\d → 2:22:0\d into the stream: clipping it now$/)
+    assert.ok(states.at(-1).streamStartedAt && states.at(-1).recordingStartedAt)
     assert.ok(states.at(-1).activity.every((entry) => !Number.isNaN(Date.parse(entry.at))))
   } finally { cleanup() }
 })

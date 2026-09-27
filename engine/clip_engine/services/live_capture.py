@@ -76,6 +76,8 @@ class LiveStream:
     height: int
     # YouTube serves live audio as its own playlist, numbered like the video's.
     audio_playlist_url: Optional[str] = None
+    # When the broadcast began (Unix seconds), if the platform says.
+    started_at: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +182,16 @@ def select_live_formats(info: dict) -> tuple[dict, Optional[dict]]:
             max(audio, key=lambda fmt: (fmt.get("abr") or fmt.get("tbr") or 0, str(fmt.get("format_id")))))
 
 
+def stream_start(info: dict, now: Optional[float] = None) -> Optional[float]:
+    """The broadcast's start time: YouTube and Kick report it as release_timestamp, Twitch as timestamp."""
+    now = time.time() if now is None else now
+    for key in ("release_timestamp", "timestamp"):
+        value = info.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 < value <= now + 300:
+            return float(value)
+    return None
+
+
 def _is_not_live_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(marker in text for marker in NOT_LIVE_MARKERS)
@@ -222,6 +234,7 @@ def resolve_live_stream(channel: LiveChannel, extract: Callable[[LiveChannel], d
         platform=channel.platform,
         height=int(fmt.get("height") or 0),
         audio_playlist_url=audio["url"] if audio else None,
+        started_at=stream_start(info),
     )
 
 

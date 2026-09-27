@@ -87,6 +87,14 @@ def test_resolve_distinguishes_offline_from_failure():
     assert stream == LiveStream('https://cdn.test/v.m3u8', 'Big game', 'Streamer', 'twitch', 720)
 
 
+def test_stream_start_prefers_the_broadcast_start_and_rejects_nonsense():
+    now = 2_000_000_000
+    assert module.stream_start({'release_timestamp': 1_999_990_000, 'timestamp': 1_999_000_000}, now) == 1_999_990_000
+    assert module.stream_start({'release_timestamp': None, 'timestamp': 1_999_995_000}, now) == 1_999_995_000
+    for info in ({}, {'timestamp': 'x'}, {'timestamp': True}, {'timestamp': -5}, {'release_timestamp': now + 3600}):
+        assert module.stream_start(info, now) is None
+
+
 def playlist(first, count, *, duration=2.0, titles=None, ended=False, extra=''):
     lines = ['#EXTM3U', '#EXT-X-TARGETDURATION:2', f'#EXT-X-MEDIA-SEQUENCE:{first}', extra]
     for index in range(count):

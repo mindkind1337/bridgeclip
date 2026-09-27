@@ -61,6 +61,9 @@ export interface LiveSessionState {
   clipping: { part: number; step: string; percent: number } | null
   /** What the session did, oldest first. */
   activity: LiveActivity[]
+  /** When the broadcast began (if the platform says) and when this session started recording it. */
+  streamStartedAt?: string | null
+  recordingStartedAt?: string | null
   startedAt: string | null
   endedAt: string | null
   message: string | null

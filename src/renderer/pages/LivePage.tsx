@@ -50,6 +50,13 @@ function inputFor(channel: LiveChannel): LiveChannelInput {
   return { url, displayName, enabled, automationId, clip: { ...clip, durationRanges: [...clip.durationRanges] }, minScore, maxClipsPerChunk, maxPostsPerHour, chunkMinutes }
 }
 
+const HOUR = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+
+function missedLabel(ms: number): string {
+  const minutes = Math.round(ms / 60_000)
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`
+}
+
 function clock(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds))
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
@@ -224,6 +231,20 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
             )}
             <span>· {automation ? <>queues to <span className="text-ink">{automation.name}</span></> : 'clips stay in the Library'}</span>
           </p>
+          {running && state?.recordingStartedAt && (
+            <p className="mt-0.5 text-2xs text-ink-muted">
+              {state.streamStartedAt
+                ? <>Live since <span className="text-ink">{HOUR.format(new Date(state.streamStartedAt))}</span> · </>
+                : null}
+              recording since <span className="text-ink">{HOUR.format(new Date(state.recordingStartedAt))}</span>
+              {state.streamStartedAt && (() => {
+                const missed = Date.parse(state.recordingStartedAt) - Date.parse(state.streamStartedAt)
+                return missed > 120_000
+                  ? <span className="text-ink-subtle"> · first {missedLabel(missed)} not recorded</span>
+                  : <span className="text-success"> · from the start</span>
+              })()}
+            </p>
+          )}
           {recording && (
             <div className="mt-1.5 max-w-[360px]">
               <div className="flex justify-between text-2xs text-ink-muted">

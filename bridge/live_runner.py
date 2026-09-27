@@ -175,7 +175,10 @@ async def record(spec: dict) -> bool:
         capture = HlsCapture(
             channel, work_dir, chunks.put,
             chunk_seconds=spec["chunk_seconds"], overlap_seconds=spec["overlap_seconds"],
-            stop_event=stop, on_status=lambda status: bridge.emit({"type": "status", "status": status}),
+            stop_event=stop, on_status=lambda status: bridge.emit({
+                "type": "status", "status": status,
+                **({"stream_started_at": started} if (started := getattr(getattr(capture, "stream", None), "started_at", None)) else {}),
+            }),
             on_progress=on_progress,
             **spec.get("_capture_options", {}),
         )

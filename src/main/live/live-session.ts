@@ -41,8 +41,19 @@ function safeStep(value: unknown): string | null {
 
 function clock(seconds: number): string {
   const whole = Math.max(0, Math.round(seconds))
-  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+  const hours = Math.floor(whole / 3600)
+  const rest = `${String(Math.floor((whole % 3600) / 60)).padStart(hours ? 2 : 1, '0')}:${String(whole % 60).padStart(2, '0')}`
+  return hours ? `${hours}:${rest}` : rest
 }
+
+function duration(seconds: number): string {
+  const minutes = Math.round(seconds / 60)
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`
+}
+
+const HOUR_MINUTE = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit' })
+/** A stream start within this of the recording start counts as recording from the beginning. */
+const FROM_START_SECONDS = 120
 
 const DECISION_TEXT: Record<LiveClipDecision, (minScore: number, linked: boolean) => string> = {
   kept: (_min, linked) => linked ? 'queued for posting' : 'kept (no automation linked)',
@@ -186,8 +197,17 @@ export class LiveSession {
     switch (message.type) {
       case 'status':
         if (message.status === 'recording' && !this.stopping) {
-          if (this.state.status !== 'recording') this.log('Live found: recording started')
-          this.update({ status: 'recording' })
+          if (this.state.status !== 'recording') {
+            const now = Date.now()
+            const started = finite(message.stream_started_at) && message.stream_started_at * 1000 <= now + 300_000
+              ? message.stream_started_at * 1000 : null
+            const behind = started === null ? null : Math.max(0, (now - started) / 1000)
+            this.log(behind === null ? 'Live found: recording started (the platform did not say when the stream began)'
+              : behind <= FROM_START_SECONDS ? 'Live found: recording from the start of the stream'
+                : `Live since ${HOUR_MINUTE.format(started!)} (${duration(behind)} ago): recording from now on, the first ${duration(behind)} are not recorded`)
+            this.update({ status: 'recording', recordingStartedAt: new Date(now).toISOString(),
+              streamStartedAt: started === null ? null : new Date(started).toISOString() })
+          } else this.update({ status: 'recording' })
         }
         break
       case 'progress': {
@@ -219,9 +239,13 @@ export class LiveSession {
         this.openJobs.add(chunk.jobId)
         try { createRunRecord(this.outputDirectory, chunk.jobId, this.channel.url) }
         catch { logger.warn('live.history.writeFailed', { sessionId: this.sessionId }) }
-        const duration = finite(message.duration_s) ? message.duration_s : null
+        const length = finite(message.duration_s) ? message.duration_s : null
         const leadIn = finite(message.lead_in_s) ? message.lead_in_s : 0
-        this.log(`Part ${chunk.part} recorded${duration ? ` (${clock(duration - leadIn)}${leadIn ? `, plus ${clock(leadIn)} overlap` : ''})` : ''}: clipping it now`)
+        // Where the part sits in the broadcast: approximate, since skipped ads are not counted.
+        const into = this.state.streamStartedAt && this.state.recordingStartedAt
+          ? (Date.parse(this.state.recordingStartedAt) - Date.parse(this.state.streamStartedAt)) / 1000 + chunk.streamOffsetSeconds : null
+        const span = into !== null && length ? ` · about ${clock(into)} → ${clock(into + length)} into the stream` : ''
+        this.log(`Part ${chunk.part} recorded${length ? ` (${clock(length - leadIn)}${leadIn ? `, plus ${clock(leadIn)} overlap` : ''})` : ''}${span}: clipping it now`)
         this.update({ processingPart: chunk.part, clipping: { part: chunk.part, step: 'Starting', percent: 0 } })
         break
       }
