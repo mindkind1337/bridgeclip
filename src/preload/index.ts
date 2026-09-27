@@ -15,6 +15,7 @@ import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTi
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
 import type { LiveChannelInput, LiveOverview } from '../shared/live'
+import type { RunTranscript } from '../shared/job-output'
 
 export interface ClipSettings {
   openrouterConfigured: boolean
@@ -138,6 +139,8 @@ export interface BridgeClipAPI {
   history: {
     list: () => Promise<HistoryEntry[]>
     getJob: (outputDir: string) => Promise<Record<string, unknown> | null>
+    /** The run's transcript, and its chat for live parts; null when the run has none. */
+    transcript: (outputDir: string) => Promise<RunTranscript | null>
   }
   thumbnails: {
     generate: (videoPath: string, seekSeconds?: number) => Promise<string | null>
@@ -252,7 +255,8 @@ const api: BridgeClipAPI = {
   },
   history: {
     list: () => ipcRenderer.invoke('history:list'),
-    getJob: (outputDir) => ipcRenderer.invoke('history:getJob', outputDir)
+    getJob: (outputDir) => ipcRenderer.invoke('history:getJob', outputDir),
+    transcript: (outputDir) => ipcRenderer.invoke('history:transcript', outputDir)
   },
   thumbnails: {
     generate: (videoPath, seekSeconds) => ipcRenderer.invoke('thumbnails:generate', videoPath, seekSeconds)

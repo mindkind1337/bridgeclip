@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ArrowLeft, Check, Clapperboard, Download, FolderOpen, ListPlus, Plus, Send } from 'lucide-react'
+import { ArrowLeft, Check, Clapperboard, Download, FileText, FolderOpen, ListPlus, Plus, Send } from 'lucide-react'
 import { basename, cn, errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import { clipFilePath } from '../lib/thumbnails'
@@ -7,6 +7,7 @@ import type { ApiCosts, ClipArtifact, JobOutput } from '../store/use-job-store'
 import { ClipCard } from './ClipCard'
 import { RunStats } from './RunStats'
 import { AddToAutomationDialog } from './AddToAutomationDialog'
+import { TranscriptDialog } from './TranscriptDialog'
 import { PostDialog, type PostableClip } from './PostDialog'
 import { Page } from './ui/Page'
 import { PageHeader } from './ui/PageHeader'
@@ -42,6 +43,7 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
   const [sort, setSort] = useState<Sort>('score')
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [exporting, setExporting] = useState(false)
+  const [showTranscript, setShowTranscript] = useState(false)
   const [posting, setPosting] = useState<PostableClip[] | null>(null)
   const [bankClips, setBankClips] = useState<number[] | null>(null)
   const [addedToBank, setAddedToBank] = useState(false)
@@ -138,6 +140,11 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
         title={output.source_video_title || 'Untitled video'}
         actions={
           <>
+            {outputDir && (
+              <Button variant="ghost" icon={<FileText className="h-3.5 w-3.5" />} onClick={() => setShowTranscript(true)}>
+                Transcript
+              </Button>
+            )}
             {outputDir && (
               <Button icon={<FolderOpen className="h-3.5 w-3.5" />} onClick={() => getApi().shell.openPath(outputDir)}>
                 Open folder
@@ -300,6 +307,7 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
           noticeTimer.current = setTimeout(() => setNotice(null), 6000)
         }}
       />}
+      {showTranscript && outputDir && <TranscriptDialog outputDir={outputDir} output={output} onClose={() => setShowTranscript(false)} />}
     </Page>
   )
 }

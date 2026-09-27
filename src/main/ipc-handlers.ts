@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
-import { ensureOutputDir, getJobHistory, getJobOutput, generateThumbnail } from './file-manager'
+import { ensureOutputDir, getJobHistory, getJobOutput, getRunTranscript, generateThumbnail } from './file-manager'
 import {
   getEnginePath,
   getBridgeRunnerPath,
@@ -260,6 +260,13 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     assertAbsolutePath(outputDir)
     if (!isWithinDirectory(outputDir, loadSettings().outputDirectory)) throw new Error('Job is outside the library')
     return getJobOutput(outputDir, loadSettings().outputDirectory)
+  })
+
+  handle('history:transcript', (_event, outputDir: unknown) => {
+    assertAbsolutePath(outputDir)
+    const library = loadSettings().outputDirectory
+    if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
+    return getRunTranscript(outputDir, library)
   })
 
   handle('thumbnails:generate', async (_event, videoPath: string, seekSeconds?: number) => {

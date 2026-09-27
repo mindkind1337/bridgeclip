@@ -186,3 +186,10 @@ export function parseJobOutput(value: unknown): JobOutput | null {
     ...(typeof value.user_id === 'string' ? { user_id: value.user_id.slice(0, 128) } : {})
   }
 }
+
+/** A run's transcript lines (seconds on the source timeline) and, for live parts, its chat. */
+export interface RunTranscript {
+  language: string | null
+  lines: { start: number; end: number; text: string; speaker: string | null }[]
+  chat: { messages: { t: number; text: string }[]; truncated: boolean } | null
+}
