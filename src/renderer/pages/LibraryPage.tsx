@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Clapperboard, FolderOpen, ListVideo, RefreshCw, Search, Sparkles } from 'lucide-react'
+import { AlertTriangle, Clapperboard, FolderOpen, LayoutGrid, List, ListVideo, RefreshCw, Search, Sparkles } from 'lucide-react'
 import { getApi } from '../lib/ipc'
 import { cn, errorMessage, formatRelativeDate, formatUsd, localFileUrl } from '../lib/utils'
 import { clipFilePath, loadThumbnail } from '../lib/thumbnails'
@@ -15,9 +15,22 @@ import { TextInput } from '../components/ui/Field'
 import { EmptyState } from '../components/ui/EmptyState'
 import { Callout } from '../components/ui/Callout'
 import { Skeleton } from '../components/ui/Skeleton'
+import { Segmented } from '../components/ui/Segmented'
 import type { Page as AppPage } from '../components/Sidebar'
 
+type LibraryView = 'grid' | 'details'
+const VIEW_STORAGE_KEY = 'bridgeclip.library.view'
+
+function savedView(): LibraryView {
+  try { return localStorage.getItem(VIEW_STORAGE_KEY) === 'details' ? 'details' : 'grid' } catch { return 'grid' }
+}
+
 export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => void }): React.JSX.Element {
+  const [view, setView] = useState<LibraryView>(savedView)
+  const chooseView = (next: LibraryView): void => {
+    setView(next)
+    try { localStorage.setItem(VIEW_STORAGE_KEY, next) } catch { /* A remembered view is a convenience only. */ }
+  }
   const outputDirectory = useSettingsStore((s) => s.outputDirectory)
   const [entries, setEntries] = useState<HistoryEntry[] | null>(null)
   const [query, setQuery] = useState('')
@@ -129,14 +142,26 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
       )}
 
       {entries && entries.length > 0 && (
-        <TextInput
-          className="mt-5 max-w-sm rounded-full"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search by video title"
-          leading={<Search className="h-3.5 w-3.5" />}
-          aria-label="Search runs"
-        />
+        <div className="mt-5 flex flex-wrap items-center gap-3">
+          <TextInput
+            className="max-w-sm flex-1 rounded-full"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search by video title"
+            leading={<Search className="h-3.5 w-3.5" />}
+            aria-label="Search runs"
+          />
+          <Segmented
+            size="sm"
+            label="Library view"
+            value={view}
+            onChange={chooseView}
+            options={[
+              { value: 'grid', label: <span className="flex items-center gap-1.5"><LayoutGrid className="h-3.5 w-3.5" />Grid</span> },
+              { value: 'details', label: <span className="flex items-center gap-1.5"><List className="h-3.5 w-3.5" />Details</span> }
+            ]}
+          />
+        </div>
       )}
 
       <div className="mt-4">
@@ -168,6 +193,23 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
             <Search className="h-5 w-5 text-ink-subtle" />
             <p className="mt-3 text-sm text-ink-muted">No runs match “{query}”.</p>
           </div>
+        ) : view === 'details' ? (
+          <div className="glass overflow-hidden rounded-2xl" role="list" aria-label="Runs">
+            {filtered.map((entry) => (
+              <RunRow
+                key={entry.jobId}
+                entry={entry}
+                onOpen={() => openRun(entry)}
+                onOpenFolder={async () => {
+                  try {
+                    if (!await getApi().shell.openPath(entry.outputDir)) setError('This run folder is no longer available.')
+                  } catch (err) {
+                    setError(errorMessage(err, 'Could not open this run folder.'))
+                  }
+                }}
+              />
+            ))}
+          </div>
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-4">
             {filtered.map((entry) => (
@@ -188,6 +230,47 @@ export function LibraryPage({ onNavigate }: { onNavigate: (page: AppPage) => voi
         )}
       </div>
     </Page>
+  )
+}
+
+/** One run per line: a small thumbnail and the full title, date, clip count and cost. */
+function RunRow({ entry, onOpen, onOpenFolder }: {
+  entry: HistoryEntry
+  onOpen: () => void
+  onOpenFolder: () => void
+}): React.JSX.Element {
+  const failed = entry.status !== 'completed'
+  const thumb = useRunThumbnail(failed ? null : entry.outputDir)
+  const [previewFailed, setPreviewFailed] = useState(false)
+  return (
+    <div role="listitem" className="group flex items-center gap-3 border-b border-white/[0.05] px-2 py-1.5 last:border-b-0 hover:bg-white/[0.04]">
+      <button type="button" onClick={failed ? onOpenFolder : onOpen} className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        aria-label={failed ? `Open folder for ${entry.status === 'incomplete' ? 'unfinished' : 'unreadable'} run` : `Open ${entry.videoTitle}`}>
+        <div className="relative aspect-video w-28 shrink-0 overflow-hidden rounded-lg bg-black/40">
+          {thumb && !previewFailed ? (
+            <img src={localFileUrl(thumb)} alt="" draggable={false} className="h-full w-full object-contain" onError={() => setPreviewFailed(true)} />
+          ) : failed ? (
+            <div className="flex h-full items-center justify-center text-danger/70"><AlertTriangle className="h-4 w-4" /></div>
+          ) : <Skeleton className="h-full rounded-none" />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium leading-snug text-ink">
+            {failed ? `${entry.status === 'incomplete' ? 'Unfinished' : 'Unreadable'} run · Open folder` : entry.videoTitle}
+          </p>
+          <p className="mt-0.5 text-xs text-ink-subtle">{formatRelativeDate(entry.date)}</p>
+        </div>
+        {!failed && (
+          <span className="w-20 shrink-0 text-right text-xs text-ink-muted">
+            <span className="tabular text-ink">{entry.clipCount}</span> clip{entry.clipCount === 1 ? '' : 's'}
+          </span>
+        )}
+        <span className="w-16 shrink-0 text-right font-mono text-xs tabular text-ink-subtle">
+          {entry.totalCostUsd != null ? formatUsd(entry.totalCostUsd) : ''}
+        </span>
+      </button>
+      <Button size="sm" variant="ghost" iconOnly aria-label="Open folder" title="Open folder" onClick={onOpenFolder}
+        className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100" icon={<FolderOpen className="h-3.5 w-3.5" />} />
+    </div>
   )
 }
 
