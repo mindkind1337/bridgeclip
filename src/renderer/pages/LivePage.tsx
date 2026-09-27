@@ -185,6 +185,7 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
   const Icon = channel.platform === 'twitch' ? Twitch : Youtube
 
   return (
+    <section aria-label={channel.displayName}>
     <Panel padded={false} className="overflow-hidden">
       <div className="flex items-center gap-3 px-3.5 py-3">
         <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-full',
@@ -231,6 +232,7 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
       </div>
       {expanded && <ChannelSettings channel={channel} automations={automations} saving={busy === `save:${channel.id}`} onSave={onSave} onRemove={onRemove} />}
     </Panel>
+    </section>
   )
 }
 

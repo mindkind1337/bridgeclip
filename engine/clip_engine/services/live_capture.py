@@ -2,8 +2,9 @@
 
 yt-dlp only resolves the playlist. Its native HLS downloader does not record live
 streams and hands them to FFmpeg, which the network policy forbids, so segments
-are fetched here through pinned public connections and appended to local MPEG-TS
-chunks. Each finished chunk is remuxed to MP4 with a local-only FFmpeg command.
+are fetched here through pinned public connections and appended to local chunks:
+MPEG-TS segments as they are, fragmented MP4 segments after their init segment.
+Each finished chunk is remuxed to MP4 with a local-only FFmpeg command.
 """
 
 import logging
@@ -31,6 +32,8 @@ REQUEST_TIMEOUT_SECONDS = 20
 SEGMENT_ATTEMPTS = 3
 REMUX_TIMEOUT_SECONDS = 10 * 60
 MAX_WAITING_SEGMENTS = 60
+MAX_INIT_BYTES = 1024 * 1024
+MAX_INIT_SEGMENTS = 16
 
 TWITCH_LOGIN = re.compile(r"[A-Za-z0-9_]{1,25}")
 YOUTUBE_HANDLE = re.compile(r"@[A-Za-z0-9._-]{3,30}")
@@ -77,6 +80,19 @@ class Segment:
     duration: float
     title: str = ""
     discontinuity: bool = False
+    # Fragmented MP4: the init segment (EXT-X-MAP) this media segment decodes with.
+    init_uri: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Recorded:
+    """A downloaded segment of the chunk being built, with its stream offset."""
+    path: str
+    audio_path: Optional[str]
+    duration: float
+    offset: float
+    init_path: Optional[str] = None
+    audio_init_path: Optional[str] = None
 
 
 @dataclass
@@ -218,6 +234,7 @@ def parse_media_playlist(text: str, base_url: str) -> MediaPlaylist:
     pending_duration: Optional[float] = None
     pending_title = ""
     discontinuity = False
+    init_uri: Optional[str] = None
     segments: list[Segment] = []
     for line in lines[1:]:
         if not line:
@@ -230,7 +247,11 @@ def parse_media_playlist(text: str, base_url: str) -> MediaPlaylist:
             if (_attribute(line.split(":", 1)[1], "METHOD") or "NONE").upper() != "NONE":
                 raise LiveCaptureError("Encrypted live streams are not supported", "encrypted_stream")
         elif line.startswith("#EXT-X-MAP:"):
-            raise LiveCaptureError("Fragmented MP4 live streams are not supported", "unsupported_stream")
+            attributes = line.split(":", 1)[1]
+            uri = _attribute(attributes, "URI")
+            if not uri or _attribute(attributes, "BYTERANGE"):
+                raise LiveCaptureError("This live stream format is not supported", "unsupported_stream")
+            init_uri = urljoin(base_url, uri)
         elif line.startswith("#EXT-X-DISCONTINUITY") and not line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
             discontinuity = True
         elif line.startswith("#EXT-X-ENDLIST"):
@@ -243,7 +264,7 @@ def parse_media_playlist(text: str, base_url: str) -> MediaPlaylist:
             if pending_duration is None or not (0 < pending_duration <= 60):
                 raise LiveCaptureError("Invalid live playlist", "invalid_playlist")
             segments.append(Segment(sequence + len(segments), urljoin(base_url, line), pending_duration,
-                                    pending_title, discontinuity))
+                                    pending_title, discontinuity, init_uri))
             pending_duration = None
             pending_title = ""
             discontinuity = False
@@ -288,13 +309,19 @@ def fetch_public(url: str, max_bytes: int, timeout: float = REQUEST_TIMEOUT_SECO
     raise LiveCaptureError("Live redirect could not be followed", "redirect")
 
 
-def remux_chunk(ts_path: str, mp4_path: str, audio_path: Optional[str] = None) -> None:
-    """Copy local MPEG-TS (and a separate AAC track) into MP4 without re-encoding or network access."""
+def remux_chunk(video_path: str, mp4_path: str, audio_path: Optional[str] = None, *,
+                video_format: str = "mpegts", audio_format: str = "aac") -> None:
+    """Copy local media (and a separate audio track) into MP4 without re-encoding or network access.
+
+    ``video_format``/``audio_format`` are "mpegts", "aac" or "mov" (fragmented MP4).
+    """
+    if video_format not in ("mpegts", "mov") or audio_format not in ("aac", "mov"):
+        raise ValueError("Unsupported live chunk format")
     cmd = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-           "-protocol_whitelist", "file", "-format_whitelist", "mpegts",
-           "-fflags", "+genpts+discardcorrupt", "-f", "mpegts", "-i", ts_path]
+           "-protocol_whitelist", "file", "-format_whitelist", video_format,
+           "-fflags", "+genpts+discardcorrupt", "-f", video_format, "-i", video_path]
     if audio_path:
-        cmd += ["-protocol_whitelist", "file", "-format_whitelist", "aac", "-f", "aac", "-i", audio_path,
+        cmd += ["-protocol_whitelist", "file", "-format_whitelist", audio_format, "-f", audio_format, "-i", audio_path,
                 "-map", "0:v:0", "-map", "1:a:0"]
     else:
         cmd += ["-map", "0:v:0", "-map", "0:a:0?"]
@@ -347,10 +374,10 @@ class HlsCapture:
         self.content_seconds = 0.0
         self.gaps = 0
         self.skipped_ads = 0
-        # (video path, audio path or None, duration, stream offset) of the segments
-        # in the chunk being built.
-        self.current: list[tuple[str, Optional[str], float, float]] = []
-        self.lead_in: list[tuple[str, Optional[str], float, float]] = []
+        self.current: list[Recorded] = []
+        self.lead_in: list[Recorded] = []
+        # Init segment URI -> local copy, for fragmented MP4 streams.
+        self.inits: dict[str, str] = {}
 
     def run(self) -> str:
         """Return why recording stopped: "offline", "ended", "stopped" or "limit"."""
@@ -418,7 +445,7 @@ class HlsCapture:
                         self.skipped_ads += 1
                         continue
                     self._record(segment, audio_segment)
-                    if sum(item[2] for item in self.current) >= self.chunk_seconds:
+                    if sum(item.duration for item in self.current) >= self.chunk_seconds:
                         self._flush(final=False)
                 if playlist.ended:
                     self._flush(final=True)
@@ -446,7 +473,34 @@ class HlsCapture:
                 self.stop_event.wait(1)
         return None
 
+    def _init(self, uri: Optional[str]) -> Optional[str]:
+        """Local copy of a fragmented MP4 init segment, downloaded once."""
+        if uri is None or uri in self.inits:
+            return self.inits.get(uri) if uri else None
+        if len(self.inits) >= MAX_INIT_SEGMENTS:
+            raise LiveCaptureError("Live stream changed format too often", "unsupported_stream")
+        for attempt in range(SEGMENT_ATTEMPTS):
+            try:
+                data, _ = self.fetch(uri, MAX_INIT_BYTES)
+                break
+            except LiveCaptureError:
+                raise
+            except Exception:
+                if attempt == SEGMENT_ATTEMPTS - 1:
+                    return None
+                self.stop_event.wait(1)
+        path = os.path.join(self.segments_dir, f"init-{len(self.inits)}.mp4")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        self.inits[uri] = path
+        return path
+
     def _record(self, segment: Segment, audio_segment: Optional[Segment] = None) -> None:
+        init = self._init(segment.init_uri)
+        audio_init = self._init(audio_segment.init_uri) if audio_segment else None
+        if (segment.init_uri and not init) or (audio_segment and audio_segment.init_uri and not audio_init):
+            self.gaps += 1
+            return
         # Keep the tracks aligned: a segment counts only when every track arrived.
         video = self._download(segment.uri)
         audio = self._download(audio_segment.uri) if audio_segment else None
@@ -454,38 +508,51 @@ class HlsCapture:
             self.gaps += 1
             logger.warning("Live segment could not be downloaded; continuing")
             return
-        path = os.path.join(self.segments_dir, f"{segment.sequence}.ts")
+        # One chunk decodes with one init segment: a new one (e.g. a quality
+        # change) closes the chunk being built and starts a fresh one.
+        if self.current and (self.current[-1].init_path, self.current[-1].audio_init_path) != (init, audio_init):
+            self._flush(final=False)
+            self._discard(self.lead_in)
+            self.lead_in = []
+        path = os.path.join(self.segments_dir, f"{segment.sequence}.{'m4s' if init else 'ts'}")
         with open(path, "wb") as handle:
             handle.write(video)
         audio_path = None
         if audio is not None:
-            audio_path = os.path.join(self.segments_dir, f"{segment.sequence}.aac")
+            audio_path = os.path.join(self.segments_dir, f"{segment.sequence}.{'a.m4s' if audio_init else 'aac'}")
             with open(audio_path, "wb") as handle:
                 handle.write(audio)
-        self.current.append((path, audio_path, segment.duration, self.content_seconds))
+        self.current.append(Recorded(path, audio_path, segment.duration, self.content_seconds, init, audio_init))
         self.content_seconds += segment.duration
 
     def _flush(self, final: bool) -> None:
-        new_seconds = sum(item[2] for item in self.current)
+        new_seconds = sum(item.duration for item in self.current)
         if not self.current or (final and new_seconds < MIN_FINAL_CHUNK_SECONDS):
             self._discard(self.lead_in + self.current)
             self.lead_in, self.current = [], []
             return
+        if self.lead_in and (self.lead_in[0].init_path, self.lead_in[0].audio_init_path) != \
+                (self.current[0].init_path, self.current[0].audio_init_path):
+            self._discard(self.lead_in)
+            self.lead_in = []
         self.part += 1
         items = self.lead_in + self.current
-        lead_in_seconds = sum(item[2] for item in self.lead_in)
-        ts_path = os.path.join(self.work_dir, f"part-{self.part}.ts")
-        audio_path = os.path.join(self.work_dir, f"part-{self.part}.aac") if items[0][1] else None
+        first = items[0]
+        lead_in_seconds = sum(item.duration for item in self.lead_in)
+        video_path = os.path.join(self.work_dir, f"part-{self.part}.{'m4s' if first.init_path else 'ts'}")
+        audio_path = (os.path.join(self.work_dir, f"part-{self.part}.{'a.m4s' if first.audio_init_path else 'aac'}")
+                      if first.audio_path else None)
         mp4_path = os.path.join(self.work_dir, chunk_filename(self.stream.channel, self.started, self.part))
         try:
-            _concatenate([item[0] for item in items], ts_path)
+            _concatenate(([first.init_path] if first.init_path else []) + [item.path for item in items], video_path)
             if audio_path:
-                _concatenate([item[1] for item in items], audio_path)
-                self.remux(ts_path, mp4_path, audio_path)
-            else:
-                self.remux(ts_path, mp4_path)
+                _concatenate(([first.audio_init_path] if first.audio_init_path else []) + [item.audio_path for item in items],
+                             audio_path)
+            self.remux(video_path, mp4_path, audio_path,
+                       video_format="mov" if first.init_path else "mpegts",
+                       audio_format="mov" if first.audio_init_path else "aac")
         finally:
-            _remove(ts_path)
+            _remove(video_path)
             if audio_path:
                 _remove(audio_path)
         # Keep the tail of this chunk as the next chunk's lead-in so moments
@@ -496,7 +563,7 @@ class HlsCapture:
             if tail_seconds >= self.overlap_seconds:
                 break
             tail.appendleft(item)
-            tail_seconds += item[2]
+            tail_seconds += item.duration
         self._discard([item for item in items if item not in tail])
         self.lead_in, self.current = ([] if final else list(tail)), []
         if final:
@@ -504,17 +571,17 @@ class HlsCapture:
         self.on_chunk(Chunk(
             part=self.part,
             path=mp4_path,
-            stream_offset_seconds=items[0][3],
-            duration_seconds=sum(item[2] for item in items),
+            stream_offset_seconds=first.offset,
+            duration_seconds=sum(item.duration for item in items),
             lead_in_seconds=lead_in_seconds,
         ))
 
     @staticmethod
-    def _discard(items: Iterable[tuple]) -> None:
-        for video_path, audio_path, _, _ in items:
-            _remove(video_path)
-            if audio_path:
-                _remove(audio_path)
+    def _discard(items: Iterable[Recorded]) -> None:
+        for item in items:
+            _remove(item.path)
+            if item.audio_path:
+                _remove(item.audio_path)
 
 
 def _concatenate(paths: list[str], output: str) -> None:

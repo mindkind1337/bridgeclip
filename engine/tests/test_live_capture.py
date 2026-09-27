@@ -102,7 +102,7 @@ def test_parser_numbers_segments_and_resolves_uris():
 
 @pytest.mark.parametrize('extra, reason', [
     ('#EXT-X-KEY:METHOD=AES-128,URI="k"', 'encrypted_stream'),
-    ('#EXT-X-MAP:URI="init.mp4"', 'unsupported_stream'),
+    ('#EXT-X-MAP:URI="init.mp4",BYTERANGE="100@0"', 'unsupported_stream'),
     ('#EXT-X-STREAM-INF:BANDWIDTH=1', 'invalid_playlist'),
 ])
 def test_parser_refuses_unsupported_playlists(extra, reason):
@@ -150,7 +150,7 @@ def run_capture(tmp_path, stream, audio_url=None, **kwargs):
         resolves.append(channel)
         return LiveStream('https://cdn.test/live.m3u8', 'title', 'Streamer', 'twitch', 1080, audio_url)
 
-    def remux(ts_path, mp4_path, audio_path=None):
+    def remux(ts_path, mp4_path, audio_path=None, **formats):
         with open(ts_path, 'rb') as src, open(mp4_path, 'wb') as dst:
             dst.write(src.read())
             if audio_path:
@@ -267,3 +267,73 @@ def test_segments_missing_a_track_are_dropped_to_keep_sync(tmp_path):
     video, audio = chunks[0][1].split('|')
     assert 'seg3.ts' not in video and 'aud3.aac' not in audio
     assert capture.gaps == 1
+
+
+def test_fragmented_mp4_segments_carry_their_init_segment():
+    text = '\n'.join(['#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:7', '#EXT-X-MAP:URI="init-a.mp4"',
+                      '#EXTINF:2.0,live', 's7.m4s', '#EXT-X-MAP:URI="init-b.mp4"', '#EXTINF:2.0,live', 's8.m4s'])
+    parsed = module.parse_media_playlist(text, 'https://cdn.test/v/index.m3u8')
+    assert [s.init_uri for s in parsed.segments] == ['https://cdn.test/v/init-a.mp4', 'https://cdn.test/v/init-b.mp4']
+
+
+class Fmp4Stream(FakeStream):
+    """Twitch-style fragmented MP4: every playlist names its init segment."""
+
+    def __init__(self, total, switch_at=None, **kwargs):
+        super().__init__(total, **kwargs)
+        self.switch_at = switch_at
+        self.init_fetches = 0
+
+    def fetch(self, url, max_bytes):
+        if url.endswith('.m3u8'):
+            body, final = super().fetch(url, max_bytes)
+            lines = body.decode().split('\n')
+            out, first = [], int(lines[2].split(':')[1])
+            for line in lines:
+                if line.startswith('seg'):
+                    n = int(line[3:-3])
+                    init = 'init-b.mp4' if self.switch_at is not None and n >= self.switch_at else 'init-a.mp4'
+                    out += [f'#EXT-X-MAP:URI="{init}"', line.replace('.ts', '.m4s')]
+                else:
+                    out.append(line)
+            return '\n'.join(out).encode(), final
+        if 'init-' in url:
+            self.init_fetches += 1
+            return url.rsplit('/', 1)[1].encode(), url
+        return url.rsplit('/', 1)[1].encode(), url
+
+
+def test_fragmented_chunks_start_with_their_init_segment(tmp_path):
+    stream = Fmp4Stream(80)
+    capture, _, chunks, _ = run_capture(tmp_path, stream, chunk_seconds=60, overlap_seconds=10)
+    assert [c.part for c, _ in chunks] == [1, 2, 3]  # 60 + 60 + 40 s
+    for _, text in chunks:
+        assert text.startswith('init-a.mp4seg') and text.count('init-a.mp4') == 1
+    assert stream.init_fetches == 1, 'the init segment is downloaded once'
+
+
+def test_a_new_init_segment_starts_a_new_chunk(tmp_path):
+    capture, _, chunks, _ = run_capture(tmp_path, Fmp4Stream(60, switch_at=20), chunk_seconds=60, overlap_seconds=10)
+    # 40 s with init A (flushed early), then 80 s with init B and no lead-in from A.
+    first, second = chunks[0], chunks[1]
+    assert first[1].startswith('init-a.mp4') and 'init-b' not in first[1]
+    assert second[1].startswith('init-b.mp4seg20.m4s') and 'init-a' not in second[1]
+    assert (first[0].duration_seconds, second[0].lead_in_seconds) == (40, 0)
+
+
+@pytest.mark.skipif(not __import__('shutil').which('ffmpeg'), reason='needs ffmpeg')
+def test_real_remux_of_fragmented_mp4(tmp_path):
+    import subprocess
+    subprocess.run(['ffmpeg', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=30', '-f', 'lavfi',
+                    '-i', 'sine', '-t', '6', '-c:v', 'libx264', '-g', '30', '-c:a', 'aac', '-f', 'hls', '-hls_time', '2',
+                    '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4',
+                    '-hls_segment_filename', 's%d.m4s', 'x.m3u8'], check=True, cwd=tmp_path)
+    parts = [tmp_path / 'init.mp4'] + sorted(tmp_path.glob('s*.m4s'), key=lambda p: int(p.stem[1:]))
+    joined = tmp_path / 'joined.m4s'
+    joined.write_bytes(b''.join(p.read_bytes() for p in parts))
+    out = tmp_path / 'out.mp4'
+    module.remux_chunk(str(joined), str(out), video_format='mov')
+    probe = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration:stream=codec_type', '-of', 'csv=p=0',
+                            str(out)], capture_output=True, text=True, check=True).stdout.split()
+    assert 'video' in probe and 'audio' in probe
+    assert abs(float(probe[-1]) - 6) < 0.3
