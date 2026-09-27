@@ -407,3 +407,51 @@ test('the activity log says what the engine is doing and why each clip was kept 
     assert.ok(states.at(-1).activity.every((entry) => !Number.isNaN(Date.parse(entry.at))))
   } finally { cleanup() }
 })
+
+test('chat activity is reported in the log without trusting chat text', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-chat-')
+  try {
+    const { session, spawned, states } = sessionHarness(dir)
+    session.start()
+    const { child } = spawned[0]
+    child.send({ type: 'chat', state: 'connected' })
+    child.send({ type: 'chat', state: 'connected' })
+    child.send({ type: 'chat_summary', part: 1, messages: 1234, peak_s: 252, peak_count: 38, peak_reaction: 'KEKW' })
+    child.send({ type: 'chat_summary', part: 2, messages: 9, peak_s: 10, peak_count: 3, peak_reaction: 'visit evil.test now' })
+    child.send({ type: 'chat_summary', part: 3, messages: 0, timing: false })
+    child.send({ type: 'chat', state: 'reconnecting' })
+    await until(() => states.at(-1)?.activity.some((entry) => entry.text.startsWith('Chat connection lost')), 'chat lines')
+    const lines = states.at(-1).activity.map((entry) => entry.text).slice(1)
+    assert.deepEqual(lines, [
+      'Reading the Twitch chat: reactions will help pick the moments',
+      'Part 1: 1,234 chat messages · biggest reaction at 4:12 (38 messages, KEKW) · sent to the AI with the transcript',
+      'Part 2: 9 chat messages · biggest reaction at 0:10 (3 messages) · sent to the AI with the transcript',
+      "Part 3: chat not used (the platform did not time this part's video)",
+      'Chat connection lost: reconnecting'
+    ])
+  } finally { cleanup() }
+})
+
+test('a run transcript and its chat are read from the library only', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-transcript-')
+  try {
+    const { getRunTranscript } = loadMain("export { getRunTranscript } from './src/main/file-manager'", { electron: fakeElectron(dir).electron })
+    const library = path.join(dir, 'library')
+    const run = path.join(library, 'run')
+    fs.mkdirSync(run, { recursive: true })
+    fs.writeFileSync(path.join(run, 'transcript.json'), JSON.stringify({ language: 'en', segments: [
+      { start_time_ms: 5000, end_time_ms: 5700, text: "That's amazing.", speaker_label: 'S1' },
+      { start_time_ms: 'x', end_time_ms: 1, text: 'bad' },
+      { start_time_ms: 6000, end_time_ms: 7000, text: 'Next' }
+    ] }))
+    assert.deepEqual(await getRunTranscript(run, library), { language: 'en', chat: null, lines: [
+      { start: 5, end: 5.7, text: "That's amazing.", speaker: 'S1' }, { start: 6, end: 7, text: 'Next', speaker: null }] })
+    fs.writeFileSync(path.join(run, 'chat.json'), JSON.stringify({ version: 1, truncated: false, messages: [{ t: 1.5, text: 'KEKW' }, { t: 'bad' }] }))
+    assert.deepEqual((await getRunTranscript(run, library)).chat, { messages: [{ t: 1.5, text: 'KEKW' }], truncated: false })
+    const outside = path.join(dir, 'outside')
+    fs.mkdirSync(outside)
+    fs.writeFileSync(path.join(outside, 'transcript.json'), JSON.stringify({ segments: [] }))
+    assert.equal(await getRunTranscript(outside, library), null, 'a run outside the library is not read')
+    assert.equal(await getRunTranscript(path.join(library, 'missing'), library), null)
+  } finally { cleanup() }
+})

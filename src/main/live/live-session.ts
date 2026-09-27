@@ -249,6 +249,34 @@ export class LiveSession {
         this.update({ processingPart: chunk.part, clipping: { part: chunk.part, step: 'Starting', percent: 0 } })
         break
       }
+      case 'chat':
+        if (message.state === 'connected' && !this.chatConnected) {
+          this.chatConnected = true
+          this.log(`Reading the ${this.channel.platform === 'kick' ? 'Kick' : 'Twitch'} chat: reactions will help pick the moments`)
+        } else if (message.state === 'reconnecting' && this.chatConnected) {
+          this.chatConnected = false
+          this.log('Chat connection lost: reconnecting', 'warn')
+        }
+        this.update({})
+        break
+      case 'chat_summary': {
+        const part = message.part
+        if (!Number.isInteger(part)) break
+        const count = Number.isInteger(message.messages) ? message.messages as number : 0
+        if (message.timing === false) {
+          this.log(`Part ${part}: chat not used (the platform did not time this part's video)`, 'warn')
+        } else if (!count) {
+          this.log(`Part ${part}: no chat messages during this part`)
+        } else {
+          const peak = finite(message.peak_s) && Number.isInteger(message.peak_count)
+            ? ` · biggest reaction at ${clock(message.peak_s)} (${message.peak_count} messages${
+              typeof message.peak_reaction === 'string' && /^[\p{L}\p{N}\p{Emoji}]{1,24}$/u.test(message.peak_reaction) ? `, ${message.peak_reaction}` : ''})`
+            : ''
+          this.log(`Part ${part}: ${count.toLocaleString('en-US')} chat messages${peak} · sent to the AI with the transcript`)
+        }
+        this.update({})
+        break
+      }
       case 'chunk_progress': {
         const step = safeStep(message.step)
         const part = message.part
@@ -348,6 +376,7 @@ export class LiveSession {
   }
 
   private inAdBreak = false
+  private chatConnected = false
 
   /** Add a line to the session's activity log (published with the next update). */
   private log(text: string, tone: LiveActivityTone = 'info'): void {

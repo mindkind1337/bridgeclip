@@ -158,6 +158,7 @@ async def record(spec: dict) -> bool:
 
     chunks: "queue.Queue" = queue.Queue()
     stop = threading.Event()
+    chat = start_chat(channel)
     threading.Thread(target=watch_stop_file, args=(os.path.join(work_dir, STOP_FILE), stop, spec.get("_stop_poll", 1.0),
                                                     spec.get("parent_pid")), name="live-stop", daemon=True).start()
     last_progress = [0.0]
@@ -216,8 +217,10 @@ async def record(spec: dict) -> bool:
             _remove(dropped.path)
             bridge.emit({"type": "chunk_failed", "part": dropped.part, "message": "Skipped: clipping fell behind the live stream."})
         for chunk in pending:
-            await process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobRequest, JobStatus)
+            await process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobRequest, JobStatus, chat)
     thread.join()
+    if chat:
+        chat.stop.set()
     _remove_tree(work_dir)
     if outcome.get("error"):
         bridge.emit(live_error(outcome["error"]))
@@ -244,12 +247,43 @@ def chunk_progress_reporter():
     return report
 
 
-async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobRequest, JobStatus) -> None:
+def start_chat(channel):
+    """Record the channel's chat alongside the stream (Twitch and Kick), or None."""
+    if channel.platform not in ("twitch", "kick"):
+        return None
+    try:
+        from clip_engine.services.live_chat import ChatRecorder
+        name = channel.url.rstrip("/").rsplit("/", 1)[-1]
+        return ChatRecorder(channel.platform, name, threading.Event(),
+                            on_state=lambda state: bridge.emit({"type": "chat", "state": state})).start()
+    except Exception as error:
+        logger.warning("Live chat unavailable (%s)", type(error).__name__)
+        return None
+
+
+def chat_for_chunk(chat, chunk) -> tuple:
+    """(messages on the chunk's timeline, planner notes, stats); empty without chat or timing."""
+    if chat is None or not getattr(chunk, "timeline", ()):
+        return [], None, None
+    from clip_engine.services.live_chat import place_on_timeline, summarize
+    start = min(entry[1] for entry in chunk.timeline)
+    end = max(entry[1] + entry[2] for entry in chunk.timeline)
+    placed = place_on_timeline(chat.log.between(start, end), chunk.timeline)
+    notes, stats = summarize(placed, chunk.duration_seconds)
+    return placed, notes or None, stats
+
+
+async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobRequest, JobStatus, chat=None) -> None:
     job_id = str(uuid.uuid4())
     placement = {"job_id": job_id, "part": chunk.part, "stream_offset_s": chunk.stream_offset_seconds,
                  "duration_s": chunk.duration_seconds, "lead_in_s": chunk.lead_in_seconds}
     bridge.emit({"type": "chunk_started", **placement})
     _clipping_part.update(part=chunk.part, step=None)
+    chat_messages, chat_notes, chat_stats = chat_for_chunk(chat, chunk)
+    if chat is not None:
+        bridge.emit({"type": "chat_summary", "part": chunk.part,
+                     **({key: chat_stats[key] for key in ("messages", "peak_s", "peak_count", "peak_reaction", "laughs")
+                         if key in chat_stats} if chat_stats else {"messages": 0, "timing": False})})
     try:
         request = ClippingJobRequest(
             video_url=chunk.path,
@@ -266,10 +300,13 @@ async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobR
             banner_platform=clip.get("banner_platform"),
             banner_channel_url=clip.get("banner_channel_url"),
             keyterms=clip.get("keyterms") or None,
+            audience_notes=chat_notes,
         )
         started = time.monotonic()
         result = await pipeline.process_video(request)
         if result.status == JobStatus.COMPLETED and result.output:
+            if chat_stats and clip.get("output_dir"):
+                save_part_chat(os.path.join(clip["output_dir"], job_id), chat_messages, chat_stats)
             bridge.emit({"type": "chunk_done", **placement, "clips": len(result.output.clips),
                          "processing_time_seconds": time.monotonic() - started})
         else:
@@ -296,6 +333,15 @@ async def run(spec: dict) -> bool:
     if spec["mode"] == "probe":
         return probe(spec)
     return await record(spec)
+
+
+def save_part_chat(run_dir: str, messages, stats) -> None:
+    try:
+        if os.path.isdir(run_dir):
+            from clip_engine.services.live_chat import save_chat
+            save_chat(os.path.join(run_dir, "chat.json"), messages, stats)
+    except OSError:
+        logger.warning("Could not save the part's chat")
 
 
 def _remove(path: str) -> None:

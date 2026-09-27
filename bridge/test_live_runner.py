@@ -1,4 +1,5 @@
 import asyncio
+import importlib.util
 import io
 import subprocess
 import json
@@ -112,7 +113,7 @@ class LiveRunnerTests(unittest.TestCase):
     def run_spec(self, spec, modules):
         output = io.StringIO()
         with patch.dict(sys.modules, modules), patch.dict(os.environ, {"BRIDGECLIP_WORK_ROOT": self.tmp.name}), \
-                redirect_stdout(output):
+                patch.object(live, "start_chat", lambda channel: None), redirect_stdout(output):
             ok = asyncio.run(live.run(spec))
         return ok, [json.loads(line) for line in output.getvalue().splitlines()]
 
@@ -138,6 +139,30 @@ class LiveRunnerTests(unittest.TestCase):
         self.run_spec(self.spec(), self.modules(chunks=0))
         self.assertEqual(self.settings_env, {"PLANNER_MODEL": "z-ai/glm-5.3-flash",
                                              "LOCAL_OUTPUT_DIR": os.path.abspath(self.tmp.name)})
+
+    @unittest.skipIf(importlib.util.find_spec("clip_engine") is None, "needs the engine on PYTHONPATH")
+    def test_chat_is_summarized_for_the_planner_and_saved_with_the_part(self):
+        from clip_engine.services.live_chat import ChatLog
+        base = 1790532000.0
+        log = ChatLog()
+        for i in range(30):
+            log.add(base + i * 10, "hi")
+        for i in range(15):
+            log.add(base + 120 + i * 0.2, "KEKW")
+        chat = types.SimpleNamespace(log=log)
+        chunk = FakeChunk(1, os.path.join(self.tmp.name, "p.mp4"), 0.0, 300.0, 0.0)
+        chunk.timeline = tuple((float(t), base + t, 2.0) for t in range(0, 300, 2))
+        messages, notes, stats = live.chat_for_chunk(chat, chunk)
+        self.assertEqual(stats["peak_s"], 120)
+        self.assertIn("KEKW×15", notes)
+        run = os.path.join(self.tmp.name, "run")
+        os.makedirs(run)
+        live.save_part_chat(run, messages, stats)
+        with open(os.path.join(run, "chat.json"), encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["stats"]["messages"], 45)
+        self.assertEqual(live.chat_for_chunk(None, chunk), ([], None, None))
+        untimed = FakeChunk(1, "p.mp4", 0.0, 300.0, 0.0)
+        self.assertEqual(live.chat_for_chunk(chat, untimed), ([], None, None))
 
     def test_each_new_pipeline_step_is_reported_once(self):
         output = io.StringIO()

@@ -349,3 +349,35 @@ def test_real_remux_of_fragmented_mp4(tmp_path):
                             str(out)], capture_output=True, text=True, check=True).stdout.split()
     assert 'video' in probe and 'audio' in probe
     assert abs(float(probe[-1]) - 6) < 0.3
+
+
+def test_program_date_time_is_carried_to_each_segment():
+    text = '\n'.join(['#EXTM3U', '#EXT-X-TARGETDURATION:2', '#EXT-X-MEDIA-SEQUENCE:1',
+                      '#EXT-X-PROGRAM-DATE-TIME:2026-09-27T18:00:00.000Z', '#EXTINF:2.0,live', 'a.ts',
+                      '#EXTINF:2.0,live', 'b.ts', '#EXT-X-PROGRAM-DATE-TIME:2026-09-27T18:00:10.500+00:00',
+                      '#EXTINF:2.0,live', 'c.ts', '#EXT-X-PROGRAM-DATE-TIME:not a date', '#EXTINF:2.0,live', 'd.ts'])
+    base = 1790532000.0
+    parsed = module.parse_media_playlist(text, 'https://cdn.test/')
+    assert [s.program_time for s in parsed.segments] == [base, base + 2, base + 10.5, None]
+
+
+class DatedStream(FakeStream):
+    def fetch(self, url, max_bytes):
+        body, final = super().fetch(url, max_bytes)
+        if url.endswith('.m3u8'):
+            lines = body.decode().split('\n')
+            first = int(lines[2].split(':')[1])
+            lines.insert(4, f'#EXT-X-PROGRAM-DATE-TIME:2026-09-27T18:00:{first * 2:02d}.000Z' if first * 2 < 60 else
+                         f'#EXT-X-PROGRAM-DATE-TIME:2026-09-27T18:{first * 2 // 60:02d}:{first * 2 % 60:02d}.000Z')
+            body = '\n'.join(lines).encode()
+        return body, final
+
+
+def test_chunks_map_their_timeline_to_broadcast_time(tmp_path):
+    _, _, chunks, _ = run_capture(tmp_path, DatedStream(70), chunk_seconds=60, overlap_seconds=10)
+    first, second = chunks[0][0], chunks[1][0]
+    base = 1790532000.0
+    assert first.timeline[0] == (0.0, base, 2.0)
+    assert first.timeline[-1] == (58.0, base + 58, 2.0)
+    # The second chunk starts with its 10 s lead-in: broadcast time 50 s.
+    assert second.timeline[0] == (0.0, base + 50, 2.0)

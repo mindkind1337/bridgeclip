@@ -89,6 +89,8 @@ class Segment:
     discontinuity: bool = False
     # Fragmented MP4: the init segment (EXT-X-MAP) this media segment decodes with.
     init_uri: Optional[str] = None
+    # Broadcast wall-clock time of the segment's start (EXT-X-PROGRAM-DATE-TIME), Unix seconds.
+    program_time: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,7 @@ class Recorded:
     offset: float
     init_path: Optional[str] = None
     audio_init_path: Optional[str] = None
+    program_time: Optional[float] = None
 
 
 @dataclass
@@ -117,6 +120,9 @@ class Chunk:
     stream_offset_seconds: float
     duration_seconds: float
     lead_in_seconds: float
+    # (seconds into the chunk, broadcast Unix time, length) per recorded segment that had
+    # a program date-time: maps chat messages onto the chunk's own timeline.
+    timeline: tuple = ()
 
 
 def live_channel(url: str) -> LiveChannel:
@@ -257,6 +263,7 @@ def parse_media_playlist(text: str, base_url: str) -> MediaPlaylist:
     pending_title = ""
     discontinuity = False
     init_uri: Optional[str] = None
+    program_time: Optional[float] = None
     segments: list[Segment] = []
     for line in lines[1:]:
         if not line:
@@ -274,6 +281,8 @@ def parse_media_playlist(text: str, base_url: str) -> MediaPlaylist:
             if not uri or _attribute(attributes, "BYTERANGE"):
                 raise LiveCaptureError("This live stream format is not supported", "unsupported_stream")
             init_uri = urljoin(base_url, uri)
+        elif line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            program_time = _program_time(line.split(":", 1)[1])
         elif line.startswith("#EXT-X-DISCONTINUITY") and not line.startswith("#EXT-X-DISCONTINUITY-SEQUENCE"):
             discontinuity = True
         elif line.startswith("#EXT-X-ENDLIST"):
@@ -286,11 +295,22 @@ def parse_media_playlist(text: str, base_url: str) -> MediaPlaylist:
             if pending_duration is None or not (0 < pending_duration <= 60):
                 raise LiveCaptureError("Invalid live playlist", "invalid_playlist")
             segments.append(Segment(sequence + len(segments), urljoin(base_url, line), pending_duration,
-                                    pending_title, discontinuity, init_uri))
+                                    pending_title, discontinuity, init_uri, program_time))
+            # Without a new tag, the next segment starts where this one ends.
+            program_time = program_time + pending_duration if program_time is not None else None
             pending_duration = None
             pending_title = ""
             discontinuity = False
     return MediaPlaylist(target, sequence, segments, ended)
+
+
+def _program_time(value: str) -> Optional[float]:
+    from datetime import datetime
+    try:
+        stamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return stamp.timestamp() if stamp.tzinfo else None
 
 
 def is_ad_segment(segment: Segment, platform: str) -> bool:
@@ -549,7 +569,8 @@ class HlsCapture:
             audio_path = os.path.join(self.segments_dir, f"{segment.sequence}.{'a.m4s' if audio_init else 'aac'}")
             with open(audio_path, "wb") as handle:
                 handle.write(audio)
-        self.current.append(Recorded(path, audio_path, segment.duration, self.content_seconds, init, audio_init))
+        self.current.append(Recorded(path, audio_path, segment.duration, self.content_seconds, init, audio_init,
+                                     segment.program_time))
         self.content_seconds += segment.duration
 
     def _flush(self, final: bool) -> None:
@@ -601,6 +622,7 @@ class HlsCapture:
             stream_offset_seconds=first.offset,
             duration_seconds=sum(item.duration for item in items),
             lead_in_seconds=lead_in_seconds,
+            timeline=_timeline(items),
         ))
 
     @staticmethod
@@ -609,6 +631,16 @@ class HlsCapture:
             _remove(item.path)
             if item.audio_path:
                 _remove(item.audio_path)
+
+
+def _timeline(items: list[Recorded]) -> tuple:
+    position = 0.0
+    entries = []
+    for item in items:
+        if item.program_time is not None:
+            entries.append((round(position, 3), item.program_time, item.duration))
+        position += item.duration
+    return tuple(entries)
 
 
 def _concatenate(paths: list[str], output: str) -> None:
