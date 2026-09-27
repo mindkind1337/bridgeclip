@@ -1,7 +1,9 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { existsSync, realpathSync } from 'fs'
+import { writeFile } from 'fs/promises'
+import { join } from 'path'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
-import { ensureOutputDir, getJobHistory, getJobOutput, getRunTranscript, generateThumbnail } from './file-manager'
+import { ensureOutputDir, getJobHistory, getJobOutput, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
 import {
   getEnginePath,
   getBridgeRunnerPath,
@@ -267,6 +269,32 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     const library = loadSettings().outputDirectory
     if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
     return getRunTranscript(outputDir, library)
+  })
+
+  handle('history:liveTranscript', (_event, outputDir: unknown) => {
+    assertAbsolutePath(outputDir)
+    const library = loadSettings().outputDirectory
+    if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
+    return getLiveTranscript(outputDir, library)
+  })
+
+  handle('history:exportLiveTranscript', async (_event, outputDir: unknown) => {
+    assertAbsolutePath(outputDir)
+    const library = loadSettings().outputDirectory
+    if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
+    const transcript = await getLiveTranscript(outputDir, library)
+    const window = getMainWindow()
+    if (!transcript || !window) return null
+    // eslint-disable-next-line no-control-regex
+    const name = `${transcript.channel} live transcript.txt`.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Save live transcript', defaultPath: join(app.getPath('documents'), name),
+      filters: [{ name: 'Text', extensions: ['txt'] }]
+    })
+    if (result.canceled || !result.filePath) return null
+    await writeFile(result.filePath, liveTranscriptText(transcript), 'utf8')
+    shell.showItemInFolder(result.filePath)
+    return result.filePath
   })
 
   handle('thumbnails:generate', async (_event, videoPath: string, seekSeconds?: number) => {

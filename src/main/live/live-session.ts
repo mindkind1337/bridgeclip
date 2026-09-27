@@ -1,9 +1,9 @@
 import { spawn, type ChildProcess } from 'child_process'
 import { randomUUID } from 'crypto'
-import { mkdirSync, writeFileSync } from 'fs'
+import { mkdirSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { BRIDGE_CONTRACT_VERSION } from '../../shared/job-contract'
-import { LIVE_OVERLAP_SECONDS, MAX_LIVE_ACTIVITY, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LiveSessionState } from '../../shared/live'
+import { LIVE_OVERLAP_SECONDS, MAX_LIVE_ACTIVITY, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LivePartInfo, type LiveSessionState } from '../../shared/live'
 import { addLibraryClipsToAutomation } from '../automations'
 import { getJobOutput } from '../file-manager'
 import { logger } from '../logger'
@@ -62,12 +62,13 @@ const DECISION_TEXT: Record<LiveClipDecision, (minScore: number, linked: boolean
   hourly_limit: () => 'not posted: hourly posting limit reached'
 }
 
-interface ChunkPlacement { jobId: string; part: number; streamOffsetSeconds: number }
+interface ChunkPlacement { jobId: string; part: number; streamOffsetSeconds: number; leadInSeconds: number }
 
 function placement(message: Record<string, unknown>): ChunkPlacement | null {
   const { job_id: jobId, part, stream_offset_s: offset } = message
   if (typeof jobId !== 'string' || !UUID.test(jobId) || !Number.isInteger(part) || (part as number) < 1 || !finite(offset) || offset < 0) return null
-  return { jobId, part: part as number, streamOffsetSeconds: offset }
+  const leadIn = message.lead_in_s
+  return { jobId, part: part as number, streamOffsetSeconds: offset, leadInSeconds: finite(leadIn) && leadIn >= 0 ? leadIn : 0 }
 }
 
 export class LiveSession {
@@ -342,6 +343,7 @@ export class LiveSession {
       this.update({ partsDone: this.state.partsDone + 1, processingPart: null, clipping: null, message: 'A clipped part could not be read from the library.' })
       return
     }
+    this.savePartInfo(runDirectory, chunk)
     const kept = keptByChannel.get(this.channel.id) ?? []
     const selection = selectLiveClips(output.clips, chunk, kept, {
       minScore: this.channel.minScore, maxPostsPerHour: this.channel.maxPostsPerHour, now: Date.now()
@@ -373,6 +375,23 @@ export class LiveSession {
       partsDone: this.state.partsDone + 1, processingPart: null, clipsMade: this.state.clipsMade + output.clips.length,
       clipsQueued: this.state.clipsQueued + queued, message
     })
+  }
+
+  /** Lets the library join this session's parts into one transcript. */
+  private savePartInfo(runDirectory: string, chunk: ChunkPlacement): void {
+    const info: LivePartInfo = {
+      version: 1, sessionId: this.sessionId, channelId: this.channel.id, channel: this.channel.displayName,
+      platform: this.channel.platform, part: chunk.part, streamOffsetSeconds: chunk.streamOffsetSeconds,
+      leadInSeconds: chunk.leadInSeconds, recordingStartedAt: this.state.recordingStartedAt ?? null,
+      streamStartedAt: this.state.streamStartedAt ?? null
+    }
+    const temp = join(runDirectory, `live.json.${randomUUID()}.tmp`)
+    try {
+      writeFileSync(temp, JSON.stringify(info), { flag: 'wx', mode: 0o600 })
+      renameSync(temp, join(runDirectory, 'live.json'))
+    } catch {
+      logger.warn('live.partInfo.writeFailed', { sessionId: this.sessionId })
+    } finally { rmSync(temp, { force: true }) }
   }
 
   private inAdBreak = false

@@ -8,6 +8,7 @@ import { open, readdir } from 'fs/promises'
 import { isAbsolute, join, relative, sep } from 'path'
 import { resolveBinary } from './tools'
 import { parseJobOutput, type JobOutput, type RunTranscript } from '../shared/job-output'
+import { LIVE_OVERLAP_SECONDS, type LivePartInfo, type LiveTranscript } from '../shared/live'
 import { readRunRecord } from './run-history'
 
 export interface JobHistoryEntry {
@@ -249,4 +250,100 @@ export async function generateThumbnail(videoPath: string, seekSeconds?: number)
     try { unlinkSync(tempPath) } catch { /* No partial thumbnail remains. */ }
   }
   return null
+}
+
+const PART_TITLE = /^(.+) live (\d{4}-\d{2}-\d{2} \d{2}[.h]\d{2}) \((?:part|partie) (\d{1,5})\)$/
+
+function livePartInfo(value: unknown): LivePartInfo | null {
+  const info = value as LivePartInfo | null
+  if (!info || info.version !== 1 || typeof info.sessionId !== 'string' || !/^[0-9a-f-]{36}$/i.test(info.sessionId) ||
+      !Number.isInteger(info.part) || info.part < 1 || !Number.isFinite(info.streamOffsetSeconds) || info.streamOffsetSeconds < 0 ||
+      !Number.isFinite(info.leadInSeconds) || info.leadInSeconds < 0 || typeof info.channel !== 'string') return null
+  return info
+}
+
+async function readPartInfo(runDir: string, libraryDir: string): Promise<LivePartInfo | null> {
+  try { return livePartInfo((await readLibraryJson(join(runDir, 'live.json'), libraryDir, 64 * 1024))?.value) } catch { return null }
+}
+
+/**
+ * Join every clipped part of the live session this run belongs to: parts are
+ * found through live.json, or for parts recorded before it existed, through
+ * their "channel live date (part N)" title, durations and the fixed overlap.
+ * Each part's overlap with the previous one is dropped.
+ */
+export async function getLiveTranscript(outputDir: string, libraryDir: string): Promise<LiveTranscript | null> {
+  const own = await readPartInfo(outputDir, libraryDir)
+  const dirs = (await readdir(libraryDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+    .map((entry) => join(libraryDir, entry.name))
+  type Part = { part: number; runDir: string; offset: number; leadIn: number }
+  let parts: Part[] = []
+  let meta: Pick<LiveTranscript, 'channel' | 'sessionId' | 'recordingStartedAt' | 'streamStartedAt'>
+  if (own) {
+    meta = { channel: own.channel, sessionId: own.sessionId, recordingStartedAt: own.recordingStartedAt, streamStartedAt: own.streamStartedAt }
+    for (const dir of dirs) {
+      const info = dir === outputDir ? own : await readPartInfo(dir, libraryDir)
+      if (info?.sessionId === own.sessionId) parts.push({ part: info.part, runDir: dir, offset: info.streamOffsetSeconds, leadIn: info.part > 1 ? info.leadInSeconds : 0 })
+    }
+  } else {
+    const title = (await getJobOutput(outputDir, libraryDir))?.source_video_title ?? ''
+    const match = PART_TITLE.exec(title)
+    if (!match) return null
+    const found: { part: number; runDir: string; duration: number }[] = []
+    for (const dir of dirs) {
+      const output = dir === outputDir || (await readPartInfo(dir, libraryDir)) === null ? await getJobOutput(dir, libraryDir) : null
+      const other = output ? PART_TITLE.exec(output.source_video_title ?? '') : null
+      if (other && other[1] === match[1] && other[2] === match[2]) {
+        found.push({ part: Number(other[3]), runDir: dir, duration: Number(output?.source_video_duration_seconds) || 0 })
+      }
+    }
+    found.sort((a, b) => a.part - b.part)
+    let offset = 0
+    parts = found.map((item, index) => {
+      const leadIn = item.part > 1 ? Math.min(LIVE_OVERLAP_SECONDS, item.duration / 2) : 0
+      if (index > 0) offset = parts[index - 1].offset + found[index - 1].duration - leadIn
+      const entry = { part: item.part, runDir: item.runDir, offset, leadIn }
+      parts[index] = entry
+      return entry
+    })
+    meta = { channel: match[1], sessionId: null, recordingStartedAt: null, streamStartedAt: null }
+  }
+  parts.sort((a, b) => a.part - b.part)
+  const result: LiveTranscript = { ...meta, parts: [], missingParts: [], lines: [], chat: [] }
+  for (const [index, part] of parts.entries()) {
+    if (index > 0) for (let missing = parts[index - 1].part + 1; missing < part.part; missing++) result.missingParts.push(missing)
+    const transcript = await getRunTranscript(part.runDir, libraryDir)
+    result.parts.push({ part: part.part, runDir: part.runDir, hasTranscript: Boolean(transcript) })
+    for (const line of transcript?.lines ?? []) {
+      if (line.start < part.leadIn) continue
+      result.lines.push({ t: part.offset + line.start, part: part.part, text: line.text, speaker: line.speaker })
+    }
+    for (const message of transcript?.chat?.messages ?? []) {
+      if (message.t >= part.leadIn) result.chat.push({ t: part.offset + message.t, text: message.text })
+    }
+  }
+  return result.parts.length ? result : null
+}
+
+function clock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(whole / 3600)}:${String(Math.floor((whole % 3600) / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
+}
+
+/** Plain text of a live transcript, with recording time and, when known, time into the stream. */
+export function liveTranscriptText(transcript: LiveTranscript): string {
+  const recording = transcript.recordingStartedAt ? Date.parse(transcript.recordingStartedAt) : NaN
+  const stream = transcript.streamStartedAt ? Date.parse(transcript.streamStartedAt) : NaN
+  const into = Number.isFinite(recording) && Number.isFinite(stream) ? (recording - stream) / 1000 : null
+  const header = [
+    `${transcript.channel} — live transcript`,
+    transcript.streamStartedAt ? `Stream started: ${new Date(stream).toLocaleString()}` : null,
+    transcript.recordingStartedAt ? `Recording started: ${new Date(recording).toLocaleString()}` : null,
+    `Parts: ${transcript.parts.map((part) => part.part).join(', ')}${transcript.missingParts.length ? ` (missing: ${transcript.missingParts.join(', ')})` : ''}`,
+    'Times: recording time' + (into !== null ? ' / time into the stream' : '') + '. Skipped ads are not counted.',
+    ''
+  ].filter((line): line is string => line !== null)
+  const body = transcript.lines.map((line) =>
+    `[${clock(line.t)}${into !== null ? ` / ${clock(line.t + into)}` : ''}] ${line.speaker ? `(${line.speaker}) ` : ''}${line.text}`)
+  return [...header, ...body].join('\n') + '\n'
 }

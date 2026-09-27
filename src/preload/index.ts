@@ -14,7 +14,7 @@ import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
-import type { LiveChannelInput, LiveOverview } from '../shared/live'
+import type { LiveChannelInput, LiveOverview, LiveTranscript } from '../shared/live'
 import type { RunTranscript } from '../shared/job-output'
 
 export interface ClipSettings {
@@ -141,6 +141,10 @@ export interface BridgeClipAPI {
     getJob: (outputDir: string) => Promise<Record<string, unknown> | null>
     /** The run's transcript, and its chat for live parts; null when the run has none. */
     transcript: (outputDir: string) => Promise<RunTranscript | null>
+    /** Every part of the live session this run belongs to, merged; null for other runs. */
+    liveTranscript: (outputDir: string) => Promise<LiveTranscript | null>
+    /** Save the whole live transcript as a text file (asks where); resolves with the path or null. */
+    exportLiveTranscript: (outputDir: string) => Promise<string | null>
   }
   thumbnails: {
     generate: (videoPath: string, seekSeconds?: number) => Promise<string | null>
@@ -256,7 +260,9 @@ const api: BridgeClipAPI = {
   history: {
     list: () => ipcRenderer.invoke('history:list'),
     getJob: (outputDir) => ipcRenderer.invoke('history:getJob', outputDir),
-    transcript: (outputDir) => ipcRenderer.invoke('history:transcript', outputDir)
+    transcript: (outputDir) => ipcRenderer.invoke('history:transcript', outputDir),
+    liveTranscript: (outputDir) => ipcRenderer.invoke('history:liveTranscript', outputDir),
+    exportLiveTranscript: (outputDir) => ipcRenderer.invoke('history:exportLiveTranscript', outputDir)
   },
   thumbnails: {
     generate: (videoPath, seekSeconds) => ipcRenderer.invoke('thumbnails:generate', videoPath, seekSeconds)

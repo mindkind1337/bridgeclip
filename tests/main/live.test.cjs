@@ -455,3 +455,52 @@ test('a run transcript and its chat are read from the library only', async () =>
     assert.equal(await getRunTranscript(path.join(library, 'missing'), library), null)
   } finally { cleanup() }
 })
+
+test('the whole live transcript joins the parts of a session without their overlap', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-transcript-')
+  try {
+    const { getLiveTranscript, liveTranscriptText } = loadMain("export { getLiveTranscript, liveTranscriptText } from './src/main/file-manager'",
+      { electron: fakeElectron(dir).electron })
+    const library = path.join(dir, 'library')
+    const session = randomUUID()
+    const makePart = (part, offset, leadIn, lines, info = true, title = null) => {
+      const run = path.join(library, randomUUID())
+      fs.mkdirSync(run, { recursive: true })
+      fs.writeFileSync(path.join(run, 'transcript.json'), JSON.stringify({ language: 'en', segments: lines.map(([s, text]) =>
+        ({ start_time_ms: s * 1000, end_time_ms: s * 1000 + 900, text })) }))
+      fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ job_id: 'x', source_video_title: title ?? `Streamer live 2026-09-27 14.17 (part ${part})`,
+        source_video_duration_seconds: 600, total_clips: 0, clips: [] }))
+      if (info) fs.writeFileSync(path.join(run, 'live.json'), JSON.stringify({ version: 1, sessionId: session, channelId: randomUUID(), channel: 'Streamer',
+        platform: 'twitch', part, streamOffsetSeconds: offset, leadInSeconds: leadIn,
+        recordingStartedAt: '2026-09-27T18:17:00.000Z', streamStartedAt: '2026-09-27T16:00:00.000Z' }))
+      return run
+    }
+    const first = makePart(1, 0, 0, [[10, 'hello'], [590, 'end of one']])
+    makePart(2, 510, 90, [[80, 'end of one'], [95, 'start of two']])
+    makePart(4, 1530, 90, [[100, 'four']])
+    makePart(1, 0, 0, [[5, 'other session']], false, 'Other live 2026-09-27 12.00 (part 1)')
+    const live = await getLiveTranscript(first, library)
+    assert.deepEqual(live.lines.map((line) => [line.t, line.part, line.text]), [[10, 1, 'hello'], [590, 1, 'end of one'], [605, 2, 'start of two'], [1630, 4, 'four']])
+    assert.deepEqual(live.missingParts, [3])
+    const text = liveTranscriptText(live)
+    assert.match(text, /^Streamer — live transcript/)
+    assert.match(text, /\[0:00:10 \/ 2:17:10\] hello/)
+
+    // Parts recorded before live.json: grouped by title, offsets from durations and the fixed overlap.
+    const old = path.join(dir, 'old')
+    fs.mkdirSync(old)
+    const oldLibrary = old
+    const mk = (part, lines) => {
+      const run = path.join(oldLibrary, randomUUID()); fs.mkdirSync(run)
+      fs.writeFileSync(path.join(run, 'transcript.json'), JSON.stringify({ segments: lines.map(([s, text]) => ({ start_time_ms: s * 1000, end_time_ms: s * 1000 + 500, text })) }))
+      fs.writeFileSync(path.join(run, 'job_output.json'), JSON.stringify({ job_id: 'x', source_video_title: `asmongold live 2026-09-27 14.17 (part ${part})`,
+        source_video_duration_seconds: 600, total_clips: 0, clips: [] }))
+      return run
+    }
+    const oldFirst = mk(1, [[1, 'a']])
+    mk(2, [[50, 'overlap'], [100, 'b']])
+    const merged = await getLiveTranscript(oldFirst, oldLibrary)
+    assert.deepEqual(merged.lines.map((line) => [line.t, line.text]), [[1, 'a'], [610, 'b']])
+    assert.equal(merged.sessionId, null)
+  } finally { cleanup() }
+})

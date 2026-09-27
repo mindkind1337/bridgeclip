@@ -38,6 +38,35 @@ export type LiveSessionStatus = 'offline' | 'resolving' | 'recording' | 'stoppin
 
 export type LiveActivityTone = 'info' | 'good' | 'warn'
 
+/** Saved as live.json in each clipped part's run folder: which live session and where in it. */
+export interface LivePartInfo {
+  version: 1
+  sessionId: string
+  channelId: string
+  channel: string
+  platform: LivePlatform
+  part: number
+  /** Recorded content before this part (ads excluded), and the overlap it repeats from the previous part. */
+  streamOffsetSeconds: number
+  leadInSeconds: number
+  recordingStartedAt: string | null
+  streamStartedAt: string | null
+}
+
+/** Every part of one live session, merged in order without the overlaps. */
+export interface LiveTranscript {
+  channel: string
+  sessionId: string | null
+  recordingStartedAt: string | null
+  streamStartedAt: string | null
+  parts: { part: number; runDir: string; hasTranscript: boolean }[]
+  /** Parts between the first and last that are not in the library (failed or deleted). */
+  missingParts: number[]
+  /** `t` is seconds of recorded content since the session started. */
+  lines: { t: number; part: number; text: string; speaker: string | null }[]
+  chat: { t: number; text: string }[]
+}
+
 export interface LiveActivity {
   at: string
   text: string
