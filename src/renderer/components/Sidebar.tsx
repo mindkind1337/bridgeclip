@@ -150,8 +150,8 @@ function NavButton({ item, expanded, active, onNavigate }: {
     <button
       onClick={() => onNavigate(item.id)}
       aria-current={active ? 'page' : undefined}
-      aria-label={badge ? `${item.label}, ${badge} active` : item.label}
-      title={expanded ? undefined : badge ? `${item.label} · ${badge} active` : item.label}
+      aria-label={badge ? `${item.label}, ${badge} ${recordingBadge ? 'recording' : 'active'}` : item.label}
+      title={expanded ? undefined : badge ? `${item.label} · ${badge} ${recordingBadge ? 'recording' : 'active'}` : item.label}
       className={cn(
         'group relative flex w-full items-center gap-2.5 text-sm transition-[background,color,box-shadow] duration-200 ease-out',
         expanded ? 'h-8 justify-start rounded-full px-3' : 'h-9 justify-center rounded-xl',
