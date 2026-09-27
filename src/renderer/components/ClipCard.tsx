@@ -33,6 +33,8 @@ interface ClipCardProps {
   onAddToAutomation?: () => void
   /** Live clips: where the clip is in the broadcast, and a way to open the replay there. */
   replay?: { label: string; onOpen?: () => void }
+  /** Live clips: the chat spike this clip's moment caused, if any. */
+  chatReaction?: { count: number; ratio: number; reaction: string | null; delaySeconds: number } | null
 }
 
 export function ClipCard({
@@ -45,7 +47,8 @@ export function ClipCard({
   onAspect,
   onPost,
   onAddToAutomation,
-  replay
+  replay,
+  chatReaction
 }: ClipCardProps): React.JSX.Element {
   const filePath = clipFilePath(clip.s3_url)
   const [thumb, setThumb] = useState<string | null | undefined>(undefined)
@@ -197,6 +200,11 @@ export function ClipCard({
           </span>
           {layout && <span title="How this clip was framed"> · {layout}</span>}
         </p>
+        {chatReaction && (
+          <p className="mt-1 text-2xs text-warning" title={`The chat spiked ${chatReaction.delaySeconds} s into this clip: ${chatReaction.count} messages in 10 s, ${chatReaction.ratio.toFixed(1)} times the usual rate. Clips start before the reaction to include what caused it.`}>
+            🔥 Chat spike ×{chatReaction.ratio.toFixed(1)}{chatReaction.reaction ? ` · ${chatReaction.reaction}` : ''}
+          </p>
+        )}
         {replay && (replay.onOpen ? (
           <button type="button" onClick={replay.onOpen} title="Open the live's replay at this moment"
             className="mt-1 inline-flex items-center gap-1 text-2xs text-accent-hover hover:underline">

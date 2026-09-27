@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Download, ExternalLink, MessageSquare, Search, X } from 'lucide-react'
 import type { JobOutput, RunTranscript } from '../../shared/job-output'
-import type { LivePartInfo, LiveTranscript } from '../../shared/live'
+import { chatActivity, clipChatReaction, type LivePartInfo, type LiveTranscript } from '../../shared/live'
 import { cn, errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import { Button } from './ui/Button'
@@ -90,14 +90,27 @@ export function TranscriptDialog({ outputDir, output, onClose, initialScope = 'p
   const needle = query.trim().toLowerCase()
   const lines = useMemo(() => (shown?.lines ?? []).filter((line) => !needle || line.text.toLowerCase().includes(needle)), [shown, needle])
   const messages = useMemo(() => (shown?.chat?.messages ?? []).filter((item) => !needle || item.text.toLowerCase().includes(needle)), [shown, needle])
-  const activity = useMemo(() => {
-    const all = shown?.chat?.messages ?? []
-    if (!all.length) return []
-    const buckets = Array.from({ length: Math.floor(Math.max(...all.map((item) => item.t)) / CHAT_WINDOW_SECONDS) + 1 }, () => 0)
-    for (const item of all) buckets[Math.floor(item.t / CHAT_WINDOW_SECONDS)] += 1
-    return buckets
-  }, [shown])
+  const chat = useMemo(() => chatActivity(shown?.chat?.messages ?? [], CHAT_WINDOW_SECONDS), [shown])
+  const activity = chat?.counts ?? []
   const peak = Math.max(1, ...activity)
+  // Clips whose moment made the chat spike (during the clip or just after: chat lags).
+  const clipReactions = useMemo(() => new Map(clips.map((clip) => [clip.rank, clipChatReaction(chat, clip.start, clip.end)])), [chat, clips])
+
+  // Clicking a bar jumps the message list to that moment.
+  const [chatStart, setChatStart] = useState(0)
+  const [jumpTarget, setJumpTarget] = useState<number | null>(null)
+  const listRef = useRef<HTMLOListElement>(null)
+  useEffect(() => { setChatStart(0); setJumpTarget(null) }, [shown, needle])
+  const jumpTo = (seconds: number): void => {
+    const index = messages.findIndex((item) => item.t >= seconds)
+    if (index < 0) return
+    setChatStart(Math.max(0, index - 20))
+    setJumpTarget(index)
+  }
+  useEffect(() => {
+    if (jumpTarget === null) return
+    listRef.current?.querySelector(`[data-index="${jumpTarget}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  }, [jumpTarget, chatStart])
 
   return (
     <Dialog ref={panel} aria-labelledby={titleId} onBackdropMouseDown={onClose} panelClassName="max-w-[860px] h-[80vh]">
@@ -166,30 +179,61 @@ export function TranscriptDialog({ outputDir, output, onClose, initialScope = 'p
           <>
             {activity.length > 0 && (
               <div className="mb-3">
-                <p className="mb-1 flex items-center gap-1.5 text-2xs text-ink-muted"><MessageSquare className="h-3 w-3" />Messages per {CHAT_WINDOW_SECONDS} s</p>
-                <div className="flex h-16 items-end gap-px" role="img" aria-label="Chat activity over the part">
+                <p className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-2xs text-ink-muted">
+                  <span className="flex items-center gap-1.5"><MessageSquare className="h-3 w-3" />Messages per {CHAT_WINDOW_SECONDS} s · click a bar to read that moment</span>
+                  <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-warning" />chat spike</span>
+                  {scope === 'part' && clips.length > 0 && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-accent" />in a clip</span>}
+                </p>
+                <div className="flex h-16 items-end gap-px" role="group" aria-label="Chat activity over the part">
                   {activity.map((count, index) => {
                     const start = index * CHAT_WINDOW_SECONDS
                     const clip = clipAt(start, start + CHAT_WINDOW_SECONDS)
+                    const spike = chat?.spikes[index]
+                    const reaction = chat?.topReaction[index]
+                    const label = `${clock(start)} · ${count} messages${spike ? ` · spike ×${(count / (chat?.usual ?? 1)).toFixed(1)}` : ''}${reaction ? ` · ${reaction}` : ''}${clip ? ` · Clip ${clip}` : ''}`
                     return (
-                      <div key={index} title={`${clock(start)} · ${count} messages${clip ? ` · Clip ${clip}` : ''}`}
-                        className={cn('min-w-[2px] flex-1 rounded-t-sm', clip ? 'bg-accent' : 'bg-white/25')}
+                      <button key={index} type="button" title={label} aria-label={label} onClick={() => jumpTo(start)}
+                        className={cn('min-w-[2px] flex-1 rounded-t-sm transition-opacity hover:opacity-80 focus-visible:outline focus-visible:outline-1 focus-visible:outline-ink',
+                          clip ? 'bg-accent' : spike ? 'bg-warning' : 'bg-white/25', clip && spike && 'ring-1 ring-inset ring-warning')}
                         style={{ height: `${Math.max(4, (count / peak) * 100)}%` }} />
                     )
                   })}
                 </div>
+                {scope === 'part' && [...clipReactions.entries()].some(([, reaction]) => reaction) && (
+                  <ul className="mt-2 space-y-0.5 text-2xs text-ink-muted">
+                    {clips.map((clip) => {
+                      const reaction = clipReactions.get(clip.rank)
+                      return reaction ? (
+                        <li key={clip.rank}>
+                          🔥 Clip {clip.rank}{clip.title ? ` “${clip.title}”` : ''}: the chat spiked at{' '}
+                          <button type="button" className="text-accent-hover hover:underline" onClick={() => jumpTo(reaction.at)}>{clock(reaction.at)}</button>
+                          {' '}({reaction.count} messages, ×{reaction.ratio.toFixed(1)} the usual{reaction.reaction ? `, ${reaction.reaction}` : ''}).
+                          The clip starts {Math.max(0, Math.round(reaction.at - clip.start))} s before, to include what caused it.
+                        </li>
+                      ) : null
+                    })}
+                  </ul>
+                )}
               </div>
             )}
             {messages.length === 0 ? <p className="py-8 text-center text-sm text-ink-muted">No message matches.</p> : (
-              <ol className="space-y-px">
-                {messages.slice(0, MAX_SHOWN).map((item, index) => (
-                  <li key={`${item.t}-${index}`} className={cn('flex gap-3 rounded px-2 py-0.5 text-xs',
-                    clipAt(item.t, item.t + 0.01) ? 'bg-accent/[0.06]' : '')}>
+              <ol ref={listRef} className="space-y-px">
+                {chatStart > 0 && (
+                  <li className="py-1 text-center text-2xs text-ink-subtle">
+                    <button type="button" className="hover:text-ink" onClick={() => { setChatStart(0); setJumpTarget(null) }}>Show from the start</button>
+                  </li>
+                )}
+                {messages.slice(chatStart, chatStart + MAX_SHOWN).map((item, offset) => {
+                  const index = chatStart + offset
+                  return (
+                  <li key={`${item.t}-${index}`} data-index={index} className={cn('flex gap-3 rounded px-2 py-0.5 text-xs',
+                    index === jumpTarget ? 'bg-warning/15' : clipAt(item.t, item.t + 0.01) ? 'bg-accent/[0.06]' : '')}>
                     <span className="w-14 shrink-0 font-mono text-2xs tabular text-ink-subtle">{clock(item.t)}</span>
                     <span className="min-w-0 flex-1 break-words text-ink-muted">{item.text}</span>
                   </li>
-                ))}
-                {(messages.length > MAX_SHOWN || shown.chat?.truncated) && (
+                  )
+                })}
+                {(messages.length > chatStart + MAX_SHOWN || shown.chat?.truncated) && (
                   <li className="py-2 text-center text-2xs text-ink-subtle">Showing part of the chat. Search to find a message.</li>
                 )}
               </ol>

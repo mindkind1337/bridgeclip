@@ -8,7 +8,7 @@ import { ClipCard } from './ClipCard'
 import { RunStats } from './RunStats'
 import { AddToAutomationDialog } from './AddToAutomationDialog'
 import { TranscriptDialog } from './TranscriptDialog'
-import { secondsIntoStream, streamClock, type LivePartInfo } from '../../shared/live'
+import { chatActivity, clipChatReaction, secondsIntoStream, streamClock, type ChatActivity, type LivePartInfo } from '../../shared/live'
 import { PostDialog, type PostableClip } from './PostDialog'
 import { Page } from './ui/Page'
 import { PageHeader } from './ui/PageHeader'
@@ -46,6 +46,7 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
   const [exporting, setExporting] = useState(false)
   const [showTranscript, setShowTranscript] = useState(false)
   const [liveInfo, setLiveInfo] = useState<LivePartInfo | null>(null)
+  const [chat, setChat] = useState<ChatActivity | null>(null)
   const [replayError, setReplayError] = useState<string | null>(null)
   const [posting, setPosting] = useState<PostableClip[] | null>(null)
   const [bankClips, setBankClips] = useState<number[] | null>(null)
@@ -86,8 +87,16 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
     if (!outputDir) return
     let active = true
     getApi().history.liveInfo(outputDir).then((info) => { if (active) setLiveInfo(info) }).catch(() => {})
+    setChat(null)
+    getApi().history.transcript(outputDir)
+      .then((transcript) => { if (active && transcript?.chat) setChat(chatActivity(transcript.chat.messages)) }).catch(() => {})
     return () => { active = false }
   }, [outputDir])
+
+  const chatReactionFor = (clip: ClipArtifact): { count: number; ratio: number; reaction: string | null; delaySeconds: number } | null => {
+    const found = clipChatReaction(chat, clip.start_time_ms / 1000, clip.end_time_ms / 1000)
+    return found ? { ...found, delaySeconds: Math.max(0, Math.round(found.at - clip.start_time_ms / 1000)) } : null
+  }
 
   const PLATFORM_NAMES = { twitch: 'Twitch', youtube: 'YouTube', kick: 'Kick' } as const
   const replayFor = (clip: ClipArtifact): { label: string; onOpen?: () => void } | undefined => {
@@ -321,6 +330,7 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
               onPost={() => setPosting([toPostable(clip)])}
               onAddToAutomation={outputDir ? () => setBankClips([clip.clip_index]) : undefined}
               replay={replayFor(clip)}
+              chatReaction={chatReactionFor(clip)}
             />
           ))}
         </div>
