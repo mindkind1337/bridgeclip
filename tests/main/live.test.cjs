@@ -571,3 +571,29 @@ test('library runs are grouped by channel and by broadcast, across restarts', ()
   assert.equal(asmon.lives[0].streamStartedAt, start)
   assert.deepEqual(channels.map((channel) => channel.channel), ['asmongold', 'Jynxzi'], 'the channel with the newest part comes first')
 })
+
+test('a channel shows the clips of its current live, or of its latest one', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-channel-clips-')
+  try {
+    const { getChannelClips } = loadMain("export { getChannelClips } from './src/main/file-manager'", { electron: fakeElectron(dir).electron })
+    const library = path.join(dir, 'library')
+    const channel = { id: randomUUID(), url: 'https://www.twitch.tv/streamer', displayName: 'Streamer' }
+    const part = (streamStartedAt, recordingStartedAt, timelineEnd) => {
+      const job = randomUUID()
+      writeRun(library, job, [[10, 40, 0.8]])
+      fs.writeFileSync(path.join(library, job, 'live.json'), JSON.stringify({ version: 1, sessionId: randomUUID(), channelId: channel.id,
+        channel: 'Streamer', platform: 'twitch', part: 1, streamOffsetSeconds: 0, leadInSeconds: 0, recordingStartedAt, streamStartedAt,
+        timeline: [[0, Date.parse(recordingStartedAt) / 1000, timelineEnd]], replayUrl: null }))
+      return job
+    }
+    const yesterday = part('2026-09-26T16:00:00.000Z', '2026-09-26T16:05:00.000Z', 600)
+    const today = part('2026-09-27T13:00:00.000Z', '2026-09-27T18:00:00.000Z', 600)
+    const latest = await getChannelClips(channel, null, library)
+    assert.equal(latest.parts, 1)
+    assert.equal(latest.clips[0].runDir, path.join(library, today))
+    assert.deepEqual(latest.live, { streamStartedAt: '2026-09-27T13:00:00.000Z', firstRecordedAt: '2026-09-27T18:00:00.000Z', lastRecordedAt: '2026-09-27T18:10:00.000Z' })
+    assert.equal(latest.clips[0].intoStream, 5 * 3600 + 10)
+    const current = await getChannelClips(channel, Date.parse('2026-09-26T16:00:00.000Z'), library)
+    assert.equal(current.clips[0].runDir, path.join(library, yesterday))
+  } finally { cleanup() }
+})

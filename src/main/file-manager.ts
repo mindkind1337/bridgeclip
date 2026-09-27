@@ -8,7 +8,7 @@ import { open, readdir } from 'fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { resolveBinary } from './tools'
 import { parseJobOutput, type JobOutput, type RunTranscript } from '../shared/job-output'
-import { LIVE_OVERLAP_SECONDS, broadcastTime, isLiveTimeline, isReplayUrl, secondsIntoStream, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveRunInfo, type LiveTranscript } from '../shared/live'
+import { LIVE_OVERLAP_SECONDS, broadcastTime, isLiveTimeline, isReplayUrl, secondsIntoStream, type ChannelLiveSummary, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveRunInfo, type LiveTranscript } from '../shared/live'
 import { readRunRecord } from './run-history'
 
 export interface JobHistoryEntry {
@@ -412,18 +412,20 @@ export function liveTranscriptText(transcript: LiveTranscript): string {
 const MAX_CHANNEL_CLIPS = 60
 
 /**
- * Clips the library holds from a channel's live since a moment (the current
- * broadcast's start, or the start of today). Parts are recognised by their
- * live.json, or for parts recorded before it existed, by their title.
+ * Clips of one of a channel's lives: the broadcast being recorded (when its
+ * start is given), otherwise the channel's latest live in the library. Parts
+ * are recognised by their live.json, or for older parts, by their title; parts
+ * without a broadcast start join the broadcast of the same day that began
+ * before them, or form one live per day.
  */
-export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 'displayName'>, since: number,
-  libraryDir: string): Promise<{ clips: LiveChannelClip[]; parts: number }> {
+export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 'displayName'>, currentStreamStart: number | null,
+  libraryDir: string): Promise<{ clips: LiveChannelClip[]; parts: number; live: ChannelLiveSummary | null }> {
   const names = new Set([channel.displayName, channel.url.replace(/\/+$/, '').split('/').pop() ?? '']
     .map((name) => name.replace(/^@/, '').toLowerCase()).filter(Boolean))
   let entries: import('fs').Dirent[]
-  try { entries = await readdir(libraryDir, { withFileTypes: true }) } catch { return { clips: [], parts: 0 } }
-  const clips: LiveChannelClip[] = []
-  let parts = 0
+  try { entries = await readdir(libraryDir, { withFileTypes: true }) } catch { return { clips: [], parts: 0, live: null } }
+  type Found = { runDir: string; info: LivePartInfo | null; output: JobOutput; modified: number; recordedAt: number; part: number; end: number }
+  const found: Found[] = []
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.isSymbolicLink()) continue
     const runDir = join(libraryDir, entry.name)
@@ -431,28 +433,54 @@ export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 
     if (info && info.channelId !== channel.id) continue
     const read = await readJobOutput(join(runDir, 'job_output.json'), libraryDir).catch(() => null)
     if (!read) continue
-    const output = read.data
-    const title = PART_TITLE.exec(output.source_video_title ?? '')
+    const title = PART_TITLE.exec(read.data.source_video_title ?? '')
     if (!info && !(title && names.has(title[1].toLowerCase()))) continue
-    const started = info?.recordingStartedAt ? Date.parse(info.recordingStartedAt) : read.modified.getTime()
-    if (!(started >= since) && !(read.modified.getTime() >= since)) continue
-    parts += 1
-    for (const clip of output.clips) {
+    const titleTime = title ? new Date(`${title[2].replace(/[.h]/, ':').replace(' ', 'T')}:00`).getTime() : NaN
+    const recordedAt = info?.recordingStartedAt ? Date.parse(info.recordingStartedAt) : Number.isFinite(titleTime) ? titleTime : read.modified.getTime()
+    const lastSpan = info?.timeline?.[info.timeline.length - 1]
+    found.push({ runDir, info, output: read.data, modified: read.modified.getTime(), recordedAt,
+      part: info?.part ?? Number(title?.[3] ?? 0),
+      // The part's end: exact from its last broadcast span, else when it finished clipping.
+      end: lastSpan ? (lastSpan[1] + lastSpan[2]) * 1000 : read.modified.getTime() })
+  }
+  const startOf = (item: Found): number | null => item.info?.streamStartedAt ? Date.parse(item.info.streamStartedAt) : null
+  const day = (time: number): string => new Date(time).toDateString()
+  const starts = [...new Set(found.map(startOf).filter((time): time is number => time !== null))]
+  const keyOf = (item: Found): string => {
+    const own = startOf(item)
+    if (own !== null) return `s${own}`
+    const match = starts.filter((time) => day(time) === day(item.recordedAt) && time <= item.recordedAt).sort((a, b) => b - a)[0]
+    return match !== undefined ? `s${match}` : `d${day(item.recordedAt)}`
+  }
+  const groups = new Map<string, Found[]>()
+  for (const item of found) groups.set(keyOf(item), [...(groups.get(keyOf(item)) ?? []), item])
+  const chosenKey = currentStreamStart !== null && Number.isFinite(currentStreamStart) ? `s${currentStreamStart}`
+    : [...groups.entries()].sort((a, b) => Math.max(...b[1].map((item) => item.end)) - Math.max(...a[1].map((item) => item.end)))[0]?.[0]
+  const members = (chosenKey && groups.get(chosenKey)) || []
+  const clips: LiveChannelClip[] = []
+  for (const item of members) {
+    for (const clip of item.output.clips) {
       const path = clip.s3_url.startsWith('file://') ? clip.s3_url.slice('file://'.length) : clip.s3_url
-      const inside = relative(runDir, path)
+      const inside = relative(item.runDir, path)
       if (!inside || isAbsolute(inside) || inside.startsWith('..')) continue
       const startSeconds = clip.start_time_ms / 1000
       clips.push({
-        runDir, clipPath: path, clipIndex: clip.clip_index, title: clip.summary || `Clip ${clip.clip_index + 1}`,
-        score: clip.virality_score, part: info?.part ?? Number(title?.[3] ?? 0), startSeconds, durationMs: clip.duration_ms,
-        intoStream: info ? secondsIntoStream(info, startSeconds) : null,
-        hasReplay: Boolean(info?.replayUrl && info.timeline?.length && info.streamStartedAt),
-        recordedAt: read.modified.toISOString()
+        runDir: item.runDir, clipPath: path, clipIndex: clip.clip_index, title: clip.summary || `Clip ${clip.clip_index + 1}`,
+        score: clip.virality_score, part: item.part, startSeconds, durationMs: clip.duration_ms,
+        intoStream: item.info ? secondsIntoStream(item.info, startSeconds) : null,
+        hasReplay: Boolean(item.info?.replayUrl && item.info.timeline?.length && item.info.streamStartedAt),
+        recordedAt: new Date(item.modified).toISOString()
       })
     }
   }
   clips.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt) || b.score - a.score)
-  return { clips: clips.slice(0, MAX_CHANNEL_CLIPS), parts }
+  const streamStart = chosenKey?.startsWith('s') ? Number(chosenKey.slice(1)) : null
+  const live: ChannelLiveSummary | null = members.length ? {
+    streamStartedAt: streamStart !== null ? new Date(streamStart).toISOString() : null,
+    firstRecordedAt: new Date(Math.min(...members.map((item) => item.recordedAt))).toISOString(),
+    lastRecordedAt: new Date(Math.max(...members.map((item) => item.end))).toISOString()
+  } : null
+  return { clips: clips.slice(0, MAX_CHANNEL_CLIPS), parts: members.length, live }
 }
 
 /** Live details for the library list: from live.json, or parsed from a part's title for older parts. */

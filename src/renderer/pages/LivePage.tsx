@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ChevronDown, ExternalLink, Film, ListTree, MonitorPlay, Play, Plus, Radio, RefreshCw, Square, Trash2, Twitch, Youtube } from 'lucide-react'
 import {
-  DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, streamClock, type LiveActivity, type LiveChannel, type LiveChannelClip, type LiveChannelInput,
+  DEFAULT_LIVE_CHANNEL, MAX_LIVE_SESSIONS, canonicalLiveChannel, streamClock, type LiveActivity, type LiveChannel, type ChannelLiveSummary, type LiveChannelClip, type LiveChannelInput,
   type LiveClipSettings, type LiveOverview, type LiveSessionState
 } from '../../shared/live'
 import type { Automation } from '../../shared/automations'
@@ -297,7 +297,8 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
         </div>
       </div>
       {/* Older main processes (before a restart) send states without these fields. */}
-      <ChannelClips channel={channel} refreshKey={`${state?.partsDone ?? 0}-${state?.status ?? 'none'}`} />
+      <ChannelClips channel={channel} live={running} ended={state?.status === 'ended' && !running ? state : null}
+        refreshKey={`${state?.partsDone ?? 0}-${state?.status ?? 'none'}`} />
       {(state?.activity?.length ?? 0) > 0 && <ActivityLog entries={state!.activity} live={running} />}
       {expanded && <ChannelSettings channel={channel} automations={automations} saving={busy === `save:${channel.id}`} onSave={onSave} onRemove={onRemove} />}
     </Panel>
@@ -309,8 +310,31 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
  * Clips of this channel's current live (or today), read from the library so they
  * survive restarts: play them here, or open the replay at their moment.
  */
-function ChannelClips({ channel, refreshKey }: { channel: LiveChannel; refreshKey: string }): React.JSX.Element | null {
-  const [data, setData] = useState<{ clips: LiveChannelClip[]; parts: number } | null>(null)
+const WHEN = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+const AT = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
+
+function spanLabel(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000))
+  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${String(minutes % 60).padStart(2, '0')} min` : `${minutes} min`
+}
+
+/** When the last live began and ended, from the library (and the session, when it saw the stream end). */
+function lastLiveLabel(summary: ChannelLiveSummary, ended: LiveSessionState | null): string {
+  const began = summary.streamStartedAt ?? summary.firstRecordedAt
+  const endedAt = ended?.endedAt && !ended.message ? ended.endedAt : null
+  const end = endedAt ?? summary.lastRecordedAt
+  const sameDay = new Date(began).toDateString() === new Date(end).toDateString()
+  return `Last live: ${summary.streamStartedAt ? 'started' : 'recorded from'} ${WHEN.format(new Date(began))} · ` +
+    `${endedAt ? 'ended' : 'last recorded'} ${sameDay ? AT.format(new Date(end)) : WHEN.format(new Date(end))} · ${spanLabel(Date.parse(end) - Date.parse(began))}`
+}
+
+function ChannelClips({ channel, live, ended, refreshKey }: {
+  channel: LiveChannel
+  live: boolean
+  ended: LiveSessionState | null
+  refreshKey: string
+}): React.JSX.Element | null {
+  const [data, setData] = useState<{ clips: LiveChannelClip[]; parts: number; live: ChannelLiveSummary | null } | null>(null)
   const [all, setAll] = useState(false)
   const [playing, setPlaying] = useState<LiveChannelClip | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -323,14 +347,15 @@ function ChannelClips({ channel, refreshKey }: { channel: LiveChannel; refreshKe
     return () => { active = false; clearInterval(timer) }
   }, [channel.id, refreshKey])
 
-  if (!data || data.clips.length === 0) return null
+  if (!data || (data.clips.length === 0 && !data.live)) return null
   const shown = all ? data.clips : data.clips.slice(0, 4)
   return (
     <div className="border-t border-white/[0.06] px-3.5 py-2">
+      {!live && data.live && <p className="mb-1 text-2xs text-ink-muted">{lastLiveLabel(data.live, ended)}</p>}
       <div className="mb-1 flex items-center justify-between">
         <p className="flex items-center gap-1.5 text-2xs font-medium text-ink-muted">
           <Film aria-hidden className="h-3 w-3" />
-          {data.clips.length} clip{data.clips.length === 1 ? '' : 's'} from this live · {data.parts} part{data.parts === 1 ? '' : 's'}
+          {data.clips.length} clip{data.clips.length === 1 ? '' : 's'} from {live ? 'this' : 'the last'} live · {data.parts} part{data.parts === 1 ? '' : 's'}
         </p>
         {data.clips.length > 4 && (
           <button type="button" className="text-2xs text-ink-subtle hover:text-ink" onClick={() => setAll(!all)}>

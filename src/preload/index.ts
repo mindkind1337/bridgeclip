@@ -14,7 +14,7 @@ import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
-import type { LiveChannelClip, LiveChannelInput, LiveOverview, LivePartInfo, LiveRunInfo, LiveTranscript } from '../shared/live'
+import type { ChannelLiveSummary, LiveChannelClip, LiveChannelInput, LiveOverview, LivePartInfo, LiveRunInfo, LiveTranscript } from '../shared/live'
 import type { RunTranscript } from '../shared/job-output'
 
 export interface ClipSettings {
@@ -84,7 +84,7 @@ export interface BridgeClipAPI {
     /** Open the live's replay at a moment of a clipped part (seconds into that part). */
     openReplay: (outputDir: string, partSeconds: number) => Promise<boolean>
     /** Clips in the library from this channel's current live (or today). */
-    channelClips: (id: string) => Promise<{ clips: LiveChannelClip[]; parts: number }>
+    channelClips: (id: string) => Promise<{ clips: LiveChannelClip[]; parts: number; live: ChannelLiveSummary | null }>
     onUpdate: (callback: (overview: LiveOverview) => void) => () => void
   }
   settings: {

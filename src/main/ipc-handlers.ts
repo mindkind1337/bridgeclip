@@ -127,12 +127,11 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('live:watch', (_event, id: unknown) => { openLivePlayer(id) })
   handle('live:channelClips', (_event, id: unknown) => {
     const channel = getLiveChannel(id)
-    // The current broadcast when it is recording, else today.
+    // The broadcast being recorded, else the channel's latest live in the library.
     const state = getLiveOverview().sessions.find((item) => item.channelId === channel.id)
     const streamStart = state?.streamStartedAt ? Date.parse(state.streamStartedAt) : NaN
-    const today = new Date(); today.setHours(0, 0, 0, 0)
-    const since = Number.isFinite(streamStart) && state?.status !== 'ended' && state?.status !== 'error' ? streamStart : today.getTime()
-    return getChannelClips(channel, since, loadSettings().outputDirectory)
+    const recording = state && ['resolving', 'recording', 'stopping'].includes(state.status)
+    return getChannelClips(channel, recording && Number.isFinite(streamStart) ? streamStart : null, loadSettings().outputDirectory)
   })
 
   handle('automations:list', () => listAutomations())

@@ -177,6 +177,14 @@ export function groupLibraryByLive<T extends { live?: LiveRunInfo | null; date: 
   }
 }
 
+/** A channel's live as the library saw it: when it began and when its last recorded part ended. */
+export interface ChannelLiveSummary {
+  streamStartedAt: string | null
+  firstRecordedAt: string
+  /** End of the last recorded part (exact from broadcast times when known). */
+  lastRecordedAt: string
+}
+
 /** A clip made from a followed channel's live, as the Live page lists it. */
 export interface LiveChannelClip {
   runDir: string
