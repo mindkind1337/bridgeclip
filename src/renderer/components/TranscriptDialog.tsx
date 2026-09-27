@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Download, MessageSquare, Search, X } from 'lucide-react'
+import { Download, ExternalLink, MessageSquare, Search, X } from 'lucide-react'
 import type { JobOutput, RunTranscript } from '../../shared/job-output'
-import type { LiveTranscript } from '../../shared/live'
+import type { LivePartInfo, LiveTranscript } from '../../shared/live'
 import { cn, errorMessage } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import { Button } from './ui/Button'
@@ -32,6 +32,7 @@ export function TranscriptDialog({ outputDir, output, onClose }: { outputDir: st
   const [live, setLive] = useState<LiveTranscript | null>(null)
   const [scope, setScope] = useState<'part' | 'live'>('part')
   const [exported, setExported] = useState<string | null>(null)
+  const [partInfo, setPartInfo] = useState<LivePartInfo | null>(null)
 
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null
@@ -47,6 +48,7 @@ export function TranscriptDialog({ outputDir, output, onClose }: { outputDir: st
       .then((result) => { if (active) setData(result) })
       .catch((cause) => { if (active) { setError(errorMessage(cause, 'Could not read the transcript.')); setData(null) } })
     getApi().history.liveTranscript(outputDir).then((result) => { if (active) setLive(result) }).catch(() => {})
+    getApi().history.liveInfo(outputDir).then((result) => { if (active) setPartInfo(result) }).catch(() => {})
     return () => { active = false }
   }, [outputDir])
 
@@ -56,6 +58,17 @@ export function TranscriptDialog({ outputDir, output, onClose }: { outputDir: st
         chat: live.chat.length ? { messages: live.chat, truncated: false } : null }
     : data
   const partOf = (t: number): number | null => scope === 'live' && live ? live.lines.find((line) => line.t === t)?.part ?? null : null
+  // Open the replay at a line: the main process builds the link from the part's saved details.
+  const replayTarget = (lineStart: number): { runDir: string; seconds: number } | null => {
+    if (scope === 'part') return partInfo?.replayUrl ? { runDir: outputDir, seconds: lineStart } : null
+    const line = live?.lines.find((item) => item.t === lineStart)
+    const part = line && live?.parts.find((item) => item.part === line.part)
+    return part?.hasReplay && line ? { runDir: part.runDir, seconds: line.partSeconds } : null
+  }
+  const openReplay = (lineStart: number): void => {
+    const target = replayTarget(lineStart)
+    if (target) void getApi().live.openReplay(target.runDir, target.seconds).catch((cause) => setError(errorMessage(cause, 'Could not open the replay.')))
+  }
   const exportLive = async (): Promise<void> => {
     try { setExported(await getApi().history.exportLiveTranscript(outputDir)) }
     catch (cause) { setError(errorMessage(cause, 'Could not save the transcript.')) }
@@ -131,6 +144,12 @@ export function TranscriptDialog({ outputDir, output, onClose }: { outputDir: st
                       {line.text}
                     </span>
                     {clip && <span className="shrink-0 pt-0.5 text-2xs text-accent-hover">Clip {clip}</span>}
+                    {replayTarget(line.start) && (
+                      <button type="button" onClick={() => openReplay(line.start)} aria-label={`Watch this moment in the replay (${clock(line.start)})`}
+                        title="Watch this moment in the replay" className="shrink-0 self-start pt-0.5 text-ink-subtle hover:text-accent-hover">
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </li>
                 )
               })}

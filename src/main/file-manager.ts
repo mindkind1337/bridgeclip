@@ -8,7 +8,7 @@ import { open, readdir } from 'fs/promises'
 import { isAbsolute, join, relative, sep } from 'path'
 import { resolveBinary } from './tools'
 import { parseJobOutput, type JobOutput, type RunTranscript } from '../shared/job-output'
-import { LIVE_OVERLAP_SECONDS, type LivePartInfo, type LiveTranscript } from '../shared/live'
+import { LIVE_OVERLAP_SECONDS, isLiveTimeline, isReplayUrl, type LivePartInfo, type LiveTranscript } from '../shared/live'
 import { readRunRecord } from './run-history'
 
 export interface JobHistoryEntry {
@@ -258,8 +258,15 @@ function livePartInfo(value: unknown): LivePartInfo | null {
   const info = value as LivePartInfo | null
   if (!info || info.version !== 1 || typeof info.sessionId !== 'string' || !/^[0-9a-f-]{36}$/i.test(info.sessionId) ||
       !Number.isInteger(info.part) || info.part < 1 || !Number.isFinite(info.streamOffsetSeconds) || info.streamOffsetSeconds < 0 ||
-      !Number.isFinite(info.leadInSeconds) || info.leadInSeconds < 0 || typeof info.channel !== 'string') return null
-  return info
+      !Number.isFinite(info.leadInSeconds) || info.leadInSeconds < 0 || typeof info.channel !== 'string' ||
+      !['twitch', 'youtube', 'kick'].includes(info.platform)) return null
+  return { ...info, timeline: isLiveTimeline(info.timeline) ? info.timeline : [],
+    replayUrl: isReplayUrl(info.replayUrl, info.platform) ? info.replayUrl : null }
+}
+
+/** The live session details saved with a clipped part, or null for other runs. */
+export async function getLivePartInfo(outputDir: string, libraryDir: string): Promise<LivePartInfo | null> {
+  return readPartInfo(outputDir, libraryDir)
 }
 
 async function readPartInfo(runDir: string, libraryDir: string): Promise<LivePartInfo | null> {
@@ -276,14 +283,17 @@ export async function getLiveTranscript(outputDir: string, libraryDir: string): 
   const own = await readPartInfo(outputDir, libraryDir)
   const dirs = (await readdir(libraryDir, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
     .map((entry) => join(libraryDir, entry.name))
-  type Part = { part: number; runDir: string; offset: number; leadIn: number }
+  type Part = { part: number; runDir: string; offset: number; leadIn: number; hasReplay?: boolean }
   let parts: Part[] = []
   let meta: Pick<LiveTranscript, 'channel' | 'sessionId' | 'recordingStartedAt' | 'streamStartedAt'>
   if (own) {
     meta = { channel: own.channel, sessionId: own.sessionId, recordingStartedAt: own.recordingStartedAt, streamStartedAt: own.streamStartedAt }
     for (const dir of dirs) {
       const info = dir === outputDir ? own : await readPartInfo(dir, libraryDir)
-      if (info?.sessionId === own.sessionId) parts.push({ part: info.part, runDir: dir, offset: info.streamOffsetSeconds, leadIn: info.part > 1 ? info.leadInSeconds : 0 })
+      if (info?.sessionId === own.sessionId) {
+        parts.push({ part: info.part, runDir: dir, offset: info.streamOffsetSeconds, leadIn: info.part > 1 ? info.leadInSeconds : 0,
+          hasReplay: Boolean(info.replayUrl && info.timeline?.length && info.streamStartedAt) })
+      }
     }
   } else {
     const title = (await getJobOutput(outputDir, libraryDir))?.source_video_title ?? ''
@@ -313,10 +323,10 @@ export async function getLiveTranscript(outputDir: string, libraryDir: string): 
   for (const [index, part] of parts.entries()) {
     if (index > 0) for (let missing = parts[index - 1].part + 1; missing < part.part; missing++) result.missingParts.push(missing)
     const transcript = await getRunTranscript(part.runDir, libraryDir)
-    result.parts.push({ part: part.part, runDir: part.runDir, hasTranscript: Boolean(transcript) })
+    result.parts.push({ part: part.part, runDir: part.runDir, hasTranscript: Boolean(transcript), hasReplay: part.hasReplay === true })
     for (const line of transcript?.lines ?? []) {
       if (line.start < part.leadIn) continue
-      result.lines.push({ t: part.offset + line.start, part: part.part, text: line.text, speaker: line.speaker })
+      result.lines.push({ t: part.offset + line.start, part: part.part, partSeconds: line.start, text: line.text, speaker: line.speaker })
     }
     for (const message of transcript?.chat?.messages ?? []) {
       if (message.t >= part.leadIn) result.chat.push({ t: part.offset + message.t, text: message.text })

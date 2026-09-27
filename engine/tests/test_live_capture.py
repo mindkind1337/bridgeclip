@@ -381,3 +381,17 @@ def test_chunks_map_their_timeline_to_broadcast_time(tmp_path):
     assert first.timeline[-1] == (58.0, base + 58, 2.0)
     # The second chunk starts with its 10 s lead-in: broadcast time 50 s.
     assert second.timeline[0] == (0.0, base + 50, 2.0)
+
+
+def test_timeline_spans_merge_contiguous_segments_and_break_on_gaps():
+    base = 1790532000.0
+    timeline = [(0.0, base, 2.0), (2.0, base + 2, 2.0), (4.0, base + 40, 2.0), (6.0, base + 42, 2.0)]
+    assert module.compress_timeline(timeline) == [[0.0, base, 4.0], [4.0, base + 40, 4.0]]
+    assert module.compress_timeline([]) == []
+
+
+def test_youtube_replay_is_the_watch_url_of_the_broadcast():
+    channel = LiveChannel('youtube', 'https://www.youtube.com/@x/live')
+    stream = LiveStream('u', 't', 'c', 'youtube', 720, broadcast_id='HvZt-nh9sGg')
+    assert module.resolve_replay(channel, stream) == 'https://www.youtube.com/watch?v=HvZt-nh9sGg'
+    assert module.resolve_replay(channel, LiveStream('u', 't', 'c', 'youtube', 720, broadcast_id='bad id')) is None

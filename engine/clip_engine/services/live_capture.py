@@ -78,6 +78,8 @@ class LiveStream:
     audio_playlist_url: Optional[str] = None
     # When the broadcast began (Unix seconds), if the platform says.
     started_at: Optional[float] = None
+    # The platform's id for this broadcast (YouTube video id, Kick livestream slug).
+    broadcast_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -241,6 +243,7 @@ def resolve_live_stream(channel: LiveChannel, extract: Callable[[LiveChannel], d
         height=int(fmt.get("height") or 0),
         audio_playlist_url=audio["url"] if audio else None,
         started_at=stream_start(info),
+        broadcast_id=str(info.get("id"))[:200] if info.get("id") else None,
     )
 
 
@@ -641,6 +644,61 @@ def _timeline(items: list[Recorded]) -> tuple:
             entries.append((round(position, 3), item.program_time, item.duration))
         position += item.duration
     return tuple(entries)
+
+
+def compress_timeline(timeline, tolerance: float = 0.25, limit: int = 400) -> list:
+    """Merge contiguous (chunk seconds, broadcast time, length) entries into as few spans as possible."""
+    spans: list[list[float]] = []
+    for position, program_time, length in timeline:
+        last = spans[-1] if spans else None
+        if (last and abs(last[0] + last[2] - position) <= tolerance
+                and abs(last[1] + last[2] - program_time) <= tolerance):
+            last[2] = round(position + length - last[0], 3)
+        else:
+            spans.append([round(position, 3), round(program_time, 3), round(length, 3)])
+    return spans[:limit]
+
+
+REPLAY_TWITCH_MAX_SKEW = 15 * 60
+
+
+def resolve_replay(channel: "LiveChannel", stream: "LiveStream", now: Optional[float] = None) -> Optional[str]:
+    """The replay page of the broadcast being recorded, if the platform keeps one.
+
+    YouTube keeps the live at its watch URL. Twitch archives the broadcast as the
+    channel's newest video while it runs (when VODs are enabled); it is accepted
+    only if its length matches the time since the stream began. Kick lists the
+    running broadcast among the channel's videos.
+    """
+    import json
+
+    import yt_dlp
+    from yt_dlp.networking import Request
+
+    from clip_engine.network_policy import guarded_public_connections
+
+    if channel.platform == "youtube":
+        return f"https://www.youtube.com/watch?v={stream.broadcast_id}" if stream.broadcast_id and re.fullmatch(r"[\w-]{11}", stream.broadcast_id) else None
+    name = channel.url.rstrip("/").rsplit("/", 1)[-1]
+    now = time.time() if now is None else now
+    options = {"quiet": True, "no_warnings": True, "proxy": "", "extract_flat": True, "playlistend": 3}
+    with guarded_public_connections(), yt_dlp.YoutubeDL(options) as ydl:
+        if channel.platform == "twitch":
+            listing = ydl.extract_info(f"https://www.twitch.tv/{name}/videos?filter=archives&sort=time", download=False)
+            newest = next(iter(listing.get("entries") or []), None)
+            if not newest or not re.fullmatch(r"v?\d{1,20}", str(newest.get("id", ""))):
+                return None
+            duration = newest.get("duration")
+            if stream.started_at and isinstance(duration, (int, float)) and abs((now - stream.started_at) - duration) > REPLAY_TWITCH_MAX_SKEW:
+                return None
+            return f"https://www.twitch.tv/videos/{str(newest['id']).lstrip('v')}"
+        response = ydl.urlopen(Request(f"https://kick.com/api/v2/channels/{name}/videos", headers={"Accept": "application/json"}))
+        videos = json.loads(response.read(5_000_000))
+    for video in videos if isinstance(videos, list) else []:
+        uuid = (video.get("video") or {}).get("uuid") if isinstance(video, dict) else None
+        if video.get("slug") == stream.broadcast_id and isinstance(uuid, str) and re.fullmatch(r"[0-9a-f-]{36}", uuid):
+            return f"https://kick.com/{name}/videos/{uuid}"
+    return None
 
 
 def _concatenate(paths: list[str], output: str) -> None:

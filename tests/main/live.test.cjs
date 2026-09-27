@@ -504,3 +504,46 @@ test('the whole live transcript joins the parts of a session without their overl
     assert.equal(merged.sessionId, null)
   } finally { cleanup() }
 })
+
+test('replay links use exact broadcast time and only known replay pages', () => {
+  const { isReplayUrl, replayLinkAt, secondsIntoStream, broadcastTime } = shared()
+  assert.ok(isReplayUrl('https://www.twitch.tv/videos/2885452707', 'twitch'))
+  assert.ok(isReplayUrl('https://www.youtube.com/watch?v=HvZt-nh9sGg', 'youtube'))
+  assert.ok(isReplayUrl('https://kick.com/asmongold/videos/2cf5cde0-a637-4a02-992d-77a968941162', 'kick'))
+  for (const [url, platform] of [['https://evil.test/videos/1', 'twitch'], ['https://www.twitch.tv/videos/1?x=javascript:', 'twitch'],
+    ['https://www.youtube.com/watch?v=HvZt-nh9sGg', 'twitch'], ['http://www.twitch.tv/videos/1', 'twitch'], [42, 'kick']]) {
+    assert.equal(isReplayUrl(url, platform), false, String(url))
+  }
+  assert.equal(replayLinkAt('https://www.twitch.tv/videos/1', 'twitch', 3723.9), 'https://www.twitch.tv/videos/1?t=1h2m3s')
+  assert.equal(replayLinkAt('https://www.youtube.com/watch?v=HvZt-nh9sGg', 'youtube', 90), 'https://www.youtube.com/watch?v=HvZt-nh9sGg&t=90s')
+  // Part time 45 s falls in the second span, after an ad gap: broadcast time comes from that span.
+  const base = 1790532000
+  const info = { streamStartedAt: new Date((base - 3600) * 1000).toISOString(), timeline: [[0, base, 40], [40, base + 100, 60]] }
+  assert.equal(broadcastTime(info.timeline, 45), base + 105)
+  assert.equal(secondsIntoStream(info, 45), 3705)
+  assert.equal(secondsIntoStream({ ...info, timeline: [] }, 45), null)
+})
+
+test('a replay found after a part was saved is written to that part too', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-replay-')
+  try {
+    const { session, spawned, library, states } = sessionHarness(dir)
+    session.start()
+    const { child } = spawned[0]
+    child.send({ type: 'status', status: 'recording', stream_started_at: 1790528400 })
+    const job = randomUUID()
+    const timeline = [[0, 1790532000, 300]]
+    child.send({ type: 'chunk_started', job_id: job, part: 1, stream_offset_s: 0, duration_s: 300, lead_in_s: 0, timeline })
+    writeRun(library, job, [[10, 50, 0.9]])
+    child.send({ type: 'chunk_done', job_id: job, part: 1, stream_offset_s: 0, lead_in_s: 0, timeline })
+    await until(() => states.at(-1)?.partsDone === 1, 'part done')
+    const saved = () => JSON.parse(fs.readFileSync(path.join(library, job, 'live.json'), 'utf8'))
+    assert.deepEqual(saved().timeline, timeline)
+    assert.equal(saved().replayUrl, null)
+    child.send({ type: 'replay', url: 'https://evil.test/videos/1' })
+    child.send({ type: 'replay', url: 'https://www.twitch.tv/videos/2885452707' })
+    await until(() => states.at(-1)?.replayUrl, 'replay')
+    assert.equal(saved().replayUrl, 'https://www.twitch.tv/videos/2885452707')
+    assert.ok(states.at(-1).activity.some((entry) => entry.text.startsWith('Replay found: twitch.tv/videos/2885452707')))
+  } finally { cleanup() }
+})

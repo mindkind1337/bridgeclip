@@ -51,6 +51,53 @@ export interface LivePartInfo {
   leadInSeconds: number
   recordingStartedAt: string | null
   streamStartedAt: string | null
+  /** [part seconds, broadcast Unix seconds, length] spans: exact broadcast time of any moment in the part. */
+  timeline?: [number, number, number][]
+  /** The broadcast's replay page (YouTube watch page, Twitch or Kick video), once known. */
+  replayUrl?: string | null
+}
+
+const REPLAY_PATTERNS: Record<LivePlatform, RegExp> = {
+  youtube: /^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{11}$/,
+  twitch: /^https:\/\/www\.twitch\.tv\/videos\/\d{1,20}$/,
+  kick: /^https:\/\/kick\.com\/[A-Za-z0-9_-]{2,40}\/videos\/[0-9a-f-]{36}$/
+}
+
+export function isReplayUrl(value: unknown, platform: LivePlatform): value is string {
+  return typeof value === 'string' && REPLAY_PATTERNS[platform]?.test(value) === true
+}
+
+export function isLiveTimeline(value: unknown): value is [number, number, number][] {
+  return Array.isArray(value) && value.length <= 400 && value.every((span) => Array.isArray(span) && span.length === 3 &&
+    span.every((item) => typeof item === 'number' && Number.isFinite(item)) && span[0] >= 0 && span[2] > 0)
+}
+
+/** Broadcast time (Unix seconds) of a moment in a part, from its timeline; null without timing. */
+export function broadcastTime(timeline: readonly [number, number, number][] | undefined, partSeconds: number): number | null {
+  if (!timeline?.length) return null
+  const span = timeline.find(([start, , length]) => partSeconds >= start && partSeconds < start + length) ??
+    [...timeline].reverse().find(([start]) => start <= partSeconds) ?? timeline[0]
+  return span[1] + (partSeconds - span[0])
+}
+
+/** Seconds into the broadcast of a moment in a part, when both the timeline and the stream start are known. */
+export function secondsIntoStream(info: Pick<LivePartInfo, 'timeline' | 'streamStartedAt'>, partSeconds: number): number | null {
+  const at = broadcastTime(info.timeline, partSeconds)
+  const start = info.streamStartedAt ? Date.parse(info.streamStartedAt) / 1000 : NaN
+  return at !== null && Number.isFinite(start) ? Math.max(0, at - start) : null
+}
+
+/** The replay page opened at a time, in each platform's own format. */
+export function replayLinkAt(url: string, platform: LivePlatform, seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  if (platform === 'youtube') return `${url}&t=${whole}s`
+  if (platform === 'twitch') return `${url}?t=${Math.floor(whole / 3600)}h${Math.floor((whole % 3600) / 60)}m${whole % 60}s`
+  return `${url}?t=${whole}`
+}
+
+export function streamClock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(whole / 3600)}:${String(Math.floor((whole % 3600) / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`
 }
 
 /** Every part of one live session, merged in order without the overlaps. */
@@ -59,11 +106,11 @@ export interface LiveTranscript {
   sessionId: string | null
   recordingStartedAt: string | null
   streamStartedAt: string | null
-  parts: { part: number; runDir: string; hasTranscript: boolean }[]
+  parts: { part: number; runDir: string; hasTranscript: boolean; hasReplay: boolean }[]
   /** Parts between the first and last that are not in the library (failed or deleted). */
   missingParts: number[]
   /** `t` is seconds of recorded content since the session started. */
-  lines: { t: number; part: number; text: string; speaker: string | null }[]
+  lines: { t: number; part: number; partSeconds: number; text: string; speaker: string | null }[]
   chat: { t: number; text: string }[]
 }
 
@@ -86,6 +133,8 @@ export interface LiveSessionState {
   clipsQueued: number
   /** The part being recorded now: new content so far, its target length, and what was skipped. */
   recording: { part: number; seconds: number; targetSeconds: number; gaps: number; ads: number } | null
+  /** The broadcast's replay page, once the platform has one. */
+  replayUrl?: string | null
   /** The part being clipped now and the engine's current step. */
   clipping: { part: number; step: string; percent: number } | null
   /** What the session did, oldest first. */

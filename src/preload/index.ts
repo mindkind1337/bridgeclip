@@ -14,7 +14,7 @@ import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
-import type { LiveChannelInput, LiveOverview, LiveTranscript } from '../shared/live'
+import type { LiveChannelInput, LiveOverview, LivePartInfo, LiveTranscript } from '../shared/live'
 import type { RunTranscript } from '../shared/job-output'
 
 export interface ClipSettings {
@@ -79,6 +79,8 @@ export interface BridgeClipAPI {
     stop: (id: string) => Promise<LiveOverview>
     checkNow: () => Promise<LiveOverview>
     watch: (id: string) => Promise<void>
+    /** Open the live's replay at a moment of a clipped part (seconds into that part). */
+    openReplay: (outputDir: string, partSeconds: number) => Promise<boolean>
     onUpdate: (callback: (overview: LiveOverview) => void) => () => void
   }
   settings: {
@@ -145,6 +147,8 @@ export interface BridgeClipAPI {
     liveTranscript: (outputDir: string) => Promise<LiveTranscript | null>
     /** Save the whole live transcript as a text file (asks where); resolves with the path or null. */
     exportLiveTranscript: (outputDir: string) => Promise<string | null>
+    /** Where a live part sits in its broadcast and its replay page; null for other runs. */
+    liveInfo: (outputDir: string) => Promise<LivePartInfo | null>
   }
   thumbnails: {
     generate: (videoPath: string, seekSeconds?: number) => Promise<string | null>
@@ -215,6 +219,7 @@ const api: BridgeClipAPI = {
     stop: (id) => ipcRenderer.invoke('live:session:stop', id),
     checkNow: () => ipcRenderer.invoke('live:check'),
     watch: (id) => ipcRenderer.invoke('live:watch', id),
+    openReplay: (outputDir, partSeconds) => ipcRenderer.invoke('live:openReplay', outputDir, partSeconds),
     onUpdate: (callback) => subscribe('live:update', callback)
   },
   settings: {
@@ -262,7 +267,8 @@ const api: BridgeClipAPI = {
     getJob: (outputDir) => ipcRenderer.invoke('history:getJob', outputDir),
     transcript: (outputDir) => ipcRenderer.invoke('history:transcript', outputDir),
     liveTranscript: (outputDir) => ipcRenderer.invoke('history:liveTranscript', outputDir),
-    exportLiveTranscript: (outputDir) => ipcRenderer.invoke('history:exportLiveTranscript', outputDir)
+    exportLiveTranscript: (outputDir) => ipcRenderer.invoke('history:exportLiveTranscript', outputDir),
+    liveInfo: (outputDir) => ipcRenderer.invoke('history:liveInfo', outputDir)
   },
   thumbnails: {
     generate: (videoPath, seekSeconds) => ipcRenderer.invoke('thumbnails:generate', videoPath, seekSeconds)

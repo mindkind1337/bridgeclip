@@ -106,6 +106,7 @@ class LiveRunnerTests(unittest.TestCase):
                 JobStatus=types.SimpleNamespace(COMPLETED="completed")),
             "clip_engine.services.live_capture": types.SimpleNamespace(
                 HlsCapture=Capture, LiveCaptureError=FakeCaptureError, live_channel=fake_channel,
+                compress_timeline=lambda timeline: [list(entry) for entry in timeline], resolve_replay=lambda channel, stream: None,
                 resolve_live_stream=lambda channel: (
                     types.SimpleNamespace(title="Big game", channel="Streamer") if "live" in channel.url else None)),
         }

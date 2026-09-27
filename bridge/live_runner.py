@@ -171,9 +171,10 @@ async def record(spec: dict) -> bool:
         bridge.emit({"type": "progress", "part": part, "recorded_s": round(recorded, 1), "part_s": target,
                      "gaps": gaps, "ads": ads})
     outcome: dict = {}
+    capture_holder: dict = {}
 
     def capture_main() -> None:
-        capture = HlsCapture(
+        capture = capture_holder["capture"] = HlsCapture(
             channel, work_dir, chunks.put,
             chunk_seconds=spec["chunk_seconds"], overlap_seconds=spec["overlap_seconds"],
             stop_event=stop, on_status=lambda status: bridge.emit({
@@ -196,6 +197,7 @@ async def record(spec: dict) -> bool:
 
     bridge.emit({"type": "status", "status": "resolving"})
     thread = threading.Thread(target=capture_main, name="live-capture", daemon=True)
+    threading.Thread(target=find_replay, args=(channel, capture_holder, stop), name="live-replay", daemon=True).start()
     thread.start()
     pipeline = AIClippingPipeline(progress_callback=chunk_progress_reporter())
     loop = asyncio.get_running_loop()
@@ -247,6 +249,30 @@ def chunk_progress_reporter():
     return report
 
 
+REPLAY_ATTEMPTS = (60, 300, 900, 1800)
+
+
+def find_replay(channel, capture_holder: dict, stop: threading.Event) -> None:
+    """Report the broadcast's replay page once the platform has one (Twitch lists it after a few minutes)."""
+    from clip_engine.services.live_capture import resolve_replay
+    waited = 0
+    for delay in REPLAY_ATTEMPTS:
+        if stop.wait(delay - waited):
+            return
+        waited = delay
+        stream = getattr(capture_holder.get("capture"), "stream", None)
+        if stream is None:
+            continue
+        try:
+            url = resolve_replay(channel, stream)
+        except Exception as error:
+            logger.warning("Replay lookup failed (%s)", type(error).__name__)
+            continue
+        if url:
+            bridge.emit({"type": "replay", "url": url})
+            return
+
+
 def start_chat(channel):
     """Record the channel's chat alongside the stream (Twitch and Kick), or None."""
     if channel.platform not in ("twitch", "kick"):
@@ -275,8 +301,10 @@ def chat_for_chunk(chat, chunk) -> tuple:
 
 async def process_chunk(chunk, clip, caption_style, spec, pipeline, ClippingJobRequest, JobStatus, chat=None) -> None:
     job_id = str(uuid.uuid4())
+    from clip_engine.services.live_capture import compress_timeline
     placement = {"job_id": job_id, "part": chunk.part, "stream_offset_s": chunk.stream_offset_seconds,
-                 "duration_s": chunk.duration_seconds, "lead_in_s": chunk.lead_in_seconds}
+                 "duration_s": chunk.duration_seconds, "lead_in_s": chunk.lead_in_seconds,
+                 "timeline": compress_timeline(getattr(chunk, "timeline", ()))}
     bridge.emit({"type": "chunk_started", **placement})
     _clipping_part.update(part=chunk.part, step=None)
     chat_messages, chat_notes, chat_stats = chat_for_chunk(chat, chunk)

@@ -11,14 +11,19 @@ function loadSource(file, mocks = {}, globals = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/main', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? require(id), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? (id === '../shared/live' ? sharedLive() : require(id)), URL, Set, Map, process, Buffer, console, setTimeout, clearTimeout, __dirname: path.join(__dirname, '../../src/main'), ...globals })
   return module.exports
 }
-function loadShared(file) {
+/** Shared live helpers, used by main modules that group and link live parts. */
+let liveModule = null
+function sharedLive() {
+  return (liveModule ??= loadShared('live.ts', { './job-contract': loadShared('job-contract.ts') }))
+}
+function loadShared(file, mocks = {}) {
   const source = fs.readFileSync(path.join(__dirname, '../../src/shared', file), 'utf8')
   const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText
   const module = { exports: {} }
-  vm.runInNewContext(js, { module, exports: module.exports, require, URL })
+  vm.runInNewContext(js, { module, exports: module.exports, require: (id) => mocks[id] ?? require(id), URL })
   return module.exports
 }
 const TEST_WORK_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'bridgeclip-worker-test-'))

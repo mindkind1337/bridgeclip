@@ -3,7 +3,8 @@ import { existsSync, realpathSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { loadSettings, publicSettings, replaceApiKey, savePublicSettings, type ApiKeyName, type PublicSettings } from './settings-store'
-import { ensureOutputDir, getJobHistory, getJobOutput, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
+import { ensureOutputDir, getJobHistory, getJobOutput, getLivePartInfo, getLiveTranscript, getRunTranscript, generateThumbnail, liveTranscriptText } from './file-manager'
+import { isReplayUrl, replayLinkAt, secondsIntoStream } from '../shared/live'
 import {
   getEnginePath,
   getBridgeRunnerPath,
@@ -276,6 +277,26 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
     const library = loadSettings().outputDirectory
     if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
     return getLiveTranscript(outputDir, library)
+  })
+
+  handle('history:liveInfo', (_event, outputDir: unknown) => {
+    assertAbsolutePath(outputDir)
+    const library = loadSettings().outputDirectory
+    if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
+    return getLivePartInfo(outputDir, library)
+  })
+
+  // The link is built here from the part's saved details, never taken from the renderer.
+  handle('live:openReplay', async (_event, outputDir: unknown, partSeconds: unknown) => {
+    assertAbsolutePath(outputDir)
+    const library = loadSettings().outputDirectory
+    if (!isWithinDirectory(outputDir, library)) throw new Error('Run is outside the library')
+    if (typeof partSeconds !== 'number' || !Number.isFinite(partSeconds) || partSeconds < 0 || partSeconds > 24 * 3600) throw new Error('Invalid time')
+    const info = await getLivePartInfo(outputDir, library)
+    const seconds = info ? secondsIntoStream(info, partSeconds) : null
+    if (!info || !isReplayUrl(info.replayUrl, info.platform) || seconds === null) throw new Error('No replay is known for this live.')
+    await shell.openExternal(replayLinkAt(info.replayUrl, info.platform, Math.max(0, seconds - 5)))
+    return true
   })
 
   handle('history:exportLiveTranscript', async (_event, outputDir: unknown) => {

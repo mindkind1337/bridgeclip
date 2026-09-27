@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { FolderOpen, ImageOff, ListPlus, Play, Send, TrendingUp, TriangleAlert } from 'lucide-react'
+import { ExternalLink, FolderOpen, ImageOff, ListPlus, Play, Send, TrendingUp, TriangleAlert } from 'lucide-react'
 import { cn, formatTimecode, isMac, localFileUrl } from '../lib/utils'
 import { getApi } from '../lib/ipc'
 import { clipFilePath, loadThumbnail } from '../lib/thumbnails'
@@ -31,6 +31,8 @@ interface ClipCardProps {
   /** Opens the post dialog for this clip. */
   onPost?: () => void
   onAddToAutomation?: () => void
+  /** Live clips: where the clip is in the broadcast, and a way to open the replay there. */
+  replay?: { label: string; onOpen?: () => void }
 }
 
 export function ClipCard({
@@ -42,7 +44,8 @@ export function ClipCard({
   onToggleSelect,
   onAspect,
   onPost,
-  onAddToAutomation
+  onAddToAutomation,
+  replay
 }: ClipCardProps): React.JSX.Element {
   const filePath = clipFilePath(clip.s3_url)
   const [thumb, setThumb] = useState<string | null | undefined>(undefined)
@@ -194,6 +197,12 @@ export function ClipCard({
           </span>
           {layout && <span title="How this clip was framed"> · {layout}</span>}
         </p>
+        {replay && (replay.onOpen ? (
+          <button type="button" onClick={replay.onOpen} title="Open the live's replay at this moment"
+            className="mt-1 inline-flex items-center gap-1 text-2xs text-accent-hover hover:underline">
+            <ExternalLink aria-hidden className="h-3 w-3" />{replay.label}
+          </button>
+        ) : <p className="mt-1 text-2xs text-ink-subtle">{replay.label}</p>)}
         {clip.render_fallback && (
           <Badge
             tone="warning"

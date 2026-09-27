@@ -8,6 +8,7 @@ import { ClipCard } from './ClipCard'
 import { RunStats } from './RunStats'
 import { AddToAutomationDialog } from './AddToAutomationDialog'
 import { TranscriptDialog } from './TranscriptDialog'
+import { secondsIntoStream, streamClock, type LivePartInfo } from '../../shared/live'
 import { PostDialog, type PostableClip } from './PostDialog'
 import { Page } from './ui/Page'
 import { PageHeader } from './ui/PageHeader'
@@ -44,6 +45,8 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [exporting, setExporting] = useState(false)
   const [showTranscript, setShowTranscript] = useState(false)
+  const [liveInfo, setLiveInfo] = useState<LivePartInfo | null>(null)
+  const [replayError, setReplayError] = useState<string | null>(null)
   const [posting, setPosting] = useState<PostableClip[] | null>(null)
   const [bankClips, setBankClips] = useState<number[] | null>(null)
   const [addedToBank, setAddedToBank] = useState(false)
@@ -77,6 +80,30 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
 
   const firstClip = output.clips[0]
   const outputDir = runDirectory ?? (firstClip ? clipFilePath(firstClip.s3_url).replace(/[\\/][^\\/]+$/, '') : '')
+
+  useEffect(() => {
+    setLiveInfo(null)
+    if (!outputDir) return
+    let active = true
+    getApi().history.liveInfo(outputDir).then((info) => { if (active) setLiveInfo(info) }).catch(() => {})
+    return () => { active = false }
+  }, [outputDir])
+
+  const PLATFORM_NAMES = { twitch: 'Twitch', youtube: 'YouTube', kick: 'Kick' } as const
+  const replayFor = (clip: ClipArtifact): { label: string; onOpen?: () => void } | undefined => {
+    if (!liveInfo || !outputDir) return undefined
+    const into = secondsIntoStream(liveInfo, clip.start_time_ms / 1000)
+    if (into === null) return undefined
+    const label = `${streamClock(into)} into the live`
+    if (!liveInfo.replayUrl) return { label }
+    return {
+      label: `Watch at ${streamClock(into)} on ${PLATFORM_NAMES[liveInfo.platform]}`,
+      onOpen: () => {
+        setReplayError(null)
+        void getApi().live.openReplay(outputDir, clip.start_time_ms / 1000).catch((cause) => setReplayError(errorMessage(cause, 'Could not open the replay.')))
+      }
+    }
+  }
 
   const topIndex = useMemo(() => {
     let best: ClipArtifact | null = null
@@ -163,6 +190,11 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
         <p className="mt-3 text-xs text-ink-muted">All clips exported at {videoSpeed}× speed · Original voice pitch</p>
       )}
 
+      {replayError && (
+        <Callout tone="danger" className="mt-3" onDismiss={() => setReplayError(null)}>
+          {replayError}
+        </Callout>
+      )}
       {exportError && (
         <Callout tone="danger" className="mt-3" onDismiss={() => setExportError(null)}>
           {exportError}
@@ -288,6 +320,7 @@ export function ClipList({ output, outputDir: runDirectory, leading, onNewClip, 
               onAspect={aspect == null ? setAspect : undefined}
               onPost={() => setPosting([toPostable(clip)])}
               onAddToAutomation={outputDir ? () => setBankClips([clip.clip_index]) : undefined}
+              replay={replayFor(clip)}
             />
           ))}
         </div>
