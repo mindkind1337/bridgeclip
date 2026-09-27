@@ -31,6 +31,14 @@ export interface AutomationAccount {
   platform: (typeof AUTOMATION_PLATFORMS)[number]
 }
 
+/**
+ * When an automation posts. Fixed daily times (the default), or continuously:
+ * the next queued clip as soon as `minutes` have passed since the last post.
+ */
+export type AutomationSchedule = { mode: 'slots' } | { mode: 'interval'; minutes: number }
+
+export const INTERVAL_MINUTES = { min: 5, max: 1440, default: 15 } as const
+
 export type AutomationContentStatus = 'queued' | 'posting' | 'posted' | 'needs_review'
 
 export interface GeneratedPlatformMetadata {
@@ -76,6 +84,8 @@ export interface Automation {
   accounts: AutomationAccount[]
   /** Daily times in the configured IANA time zone, as HH:mm. */
   times: string[]
+  /** Missing in automations saved before continuous posting existed: daily times. */
+  schedule?: AutomationSchedule
   timezone: string
   youtubeVisibility: YouTubeVisibility
   youtubeMadeForKids: boolean
@@ -94,6 +104,8 @@ export interface AutomationUpdate {
   metadataMode: 'ai' | 'manual'
   accounts: AutomationAccount[]
   times: string[]
+  /** Omitted by older callers: keep daily times. */
+  schedule?: AutomationSchedule
   timezone: string
   youtubeVisibility: YouTubeVisibility
   youtubeMadeForKids: boolean
@@ -107,6 +119,30 @@ export function needsTikTokReview(automation: Pick<Automation, 'accounts'>, item
 
 export function nextAutomationContent(automation: Pick<Automation, 'accounts' | 'content'>): AutomationContent | undefined {
   return automation.content.find((item) => item.status === 'queued' && !needsTikTokReview(automation, item))
+}
+
+export function scheduleOf(automation: Pick<Automation, 'schedule'>): AutomationSchedule {
+  return automation.schedule ?? { mode: 'slots' }
+}
+
+export function isAutomationSchedule(value: unknown): value is AutomationSchedule {
+  if (!value || typeof value !== 'object') return false
+  const schedule = value as AutomationSchedule
+  if (schedule.mode === 'slots') return Object.keys(schedule).length === 1
+  return schedule.mode === 'interval' && Number.isInteger(schedule.minutes) &&
+    schedule.minutes >= INTERVAL_MINUTES.min && schedule.minutes <= INTERVAL_MINUTES.max
+}
+
+/**
+ * A continuous automation is due when it has a clip ready and the interval has
+ * passed since its last post or last attempt (so a failure is not retried every tick).
+ */
+export function intervalDue(automation: Pick<Automation, 'enabled' | 'schedule' | 'lastRunAt' | 'accounts' | 'content'>,
+  now: number, lastAttemptAt = 0): boolean {
+  const schedule = scheduleOf(automation)
+  if (!automation.enabled || schedule.mode !== 'interval' || !nextAutomationContent(automation)) return false
+  const lastRun = automation.lastRunAt ? Date.parse(automation.lastRunAt) : 0
+  return now - Math.max(Number.isFinite(lastRun) ? lastRun : 0, lastAttemptAt) >= schedule.minutes * 60_000
 }
 
 /** Return due local slots, including a short grace period after wake/reopen. */

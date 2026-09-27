@@ -4,7 +4,7 @@ import { createWriteStream, existsSync, lstatSync, mkdirSync, readFileSync, rena
 import { open, unlink } from 'fs/promises'
 import { basename, extname, join } from 'path'
 import { pipeline } from 'stream/promises'
-import { AUTOMATION_PLATFORMS, dueSlots, nextAutomationContent, type Automation, type AutomationAccount, type AutomationContent, type AutomationUpdate, type AutomationTikTokReview, type AutomationTikTokReviewUpdate, type GeneratedPlatformMetadata } from '../shared/automations'
+import { AUTOMATION_PLATFORMS, dueSlots, intervalDue, isAutomationSchedule, nextAutomationContent, scheduleOf, type Automation, type AutomationSchedule, type AutomationAccount, type AutomationContent, type AutomationUpdate, type AutomationTikTokReview, type AutomationTikTokReviewUpdate, type GeneratedPlatformMetadata } from '../shared/automations'
 import { isPostableAccount, isZernioId, type ZernioOverview } from '../shared/zernio'
 import { checkCaption, checkClip, defaultFacebookFormat, isValidTimeZone, tiktokOptionsError, youtubeTitleFor, type PostClipRequest } from '../shared/zernio-posts'
 import { loadSettings } from './settings-store'
@@ -28,6 +28,8 @@ const MAX_CONTENT = 500
 let cachedWorkspace: string | null = null
 let cached: Automation[] = []
 const busy = new Set<string>()
+/** Last scheduler attempt per continuous automation, so failures wait a full interval. */
+const intervalAttempts = new Map<string, number>()
 // One review per bank item; a newer preview replaces the previous one.
 const reviews = new Map<string, { id: string; fingerprint: string }>()
 
@@ -129,6 +131,7 @@ function validAutomation(value: unknown): value is Automation {
     Array.isArray(item.accounts) && item.accounts.length <= 20 &&
     item.accounts.every((account) => account && isZernioId(account.accountId) && AUTOMATION_PLATFORMS.includes(account.platform)) &&
     Array.isArray(item.times) && item.times.length <= 24 && item.times.every((time) => typeof time === 'string' && TIME.test(time)) &&
+    (item.schedule === undefined || isAutomationSchedule(item.schedule)) &&
     isValidTimeZone(item.timezone) && ['public', 'unlisted', 'private'].includes(item.youtubeVisibility) && typeof item.youtubeMadeForKids === 'boolean' &&
     item.lastSlots && typeof item.lastSlots === 'object' && !Array.isArray(item.lastSlots) &&
     Array.isArray(item.content) && item.content.length <= MAX_CONTENT && item.content.every(validContent) &&
@@ -216,7 +219,7 @@ function find(id: unknown): { workspace: string; automation: Automation } {
   return { workspace, automation }
 }
 
-function validatedUpdate(raw: unknown): AutomationUpdate {
+function validatedUpdate(raw: unknown, current: AutomationSchedule = { mode: 'slots' }): AutomationUpdate {
   if (!raw || typeof raw !== 'object') throw new Error('Invalid automation settings')
   const value = raw as AutomationUpdate
   const name = cleanName(value.name)
@@ -230,12 +233,16 @@ function validatedUpdate(raw: unknown): AutomationUpdate {
   if (!value.profileId && accounts.length > 0) throw new Error('Choose one Zernio profile before selecting accounts.')
   if (!Array.isArray(value.times) || value.times.length > 24 || !value.times.every((time: string) => TIME.test(time))) throw new Error('Use valid daily times.')
   const times = [...new Set(value.times)].sort()
-  if (value.enabled && (!value.profileId || accounts.length === 0 || times.length === 0)) throw new Error('Choose a profile, an account in it, and at least one daily time before enabling.')
+  const schedule = value.schedule === undefined ? current : value.schedule
+  if (!isAutomationSchedule(schedule)) throw new Error('Post continuously every 5 minutes to 24 hours.')
+  if (value.enabled && schedule.mode === 'slots' && (!value.profileId || accounts.length === 0 || times.length === 0)) throw new Error('Choose a profile, an account in it, and at least one daily time before enabling.')
+  if (value.enabled && (!value.profileId || accounts.length === 0)) throw new Error('Choose a profile and an account in it before enabling.')
   if (value.enabled && value.metadataMode === 'ai') {
     const settings = loadSettings()
     if (!settings.openrouterApiKey) throw new Error('Add an OpenRouter API key in Settings before enabling automatic metadata.')
   }
-  return { name, enabled: value.enabled, profileId: value.profileId, metadataMode: value.metadataMode, accounts, times, timezone: value.timezone, youtubeVisibility: value.youtubeVisibility, youtubeMadeForKids: value.youtubeMadeForKids }
+  return { name, enabled: value.enabled, profileId: value.profileId, metadataMode: value.metadataMode, accounts, times,
+    schedule: schedule.mode === 'interval' ? { mode: 'interval', minutes: schedule.minutes } : { mode: 'slots' }, timezone: value.timezone, youtubeVisibility: value.youtubeVisibility, youtubeMadeForKids: value.youtubeMadeForKids }
 }
 
 function checkProfileAccounts(overview: ZernioOverview, profileId: string, accounts: AutomationAccount[]): void {
@@ -283,7 +290,7 @@ export function createAutomation(rawName: unknown): Automation[] {
 export async function updateAutomation(id: unknown, raw: unknown): Promise<Automation[]> {
   const { workspace, automation } = find(id)
   if (busy.has(automation.id)) throw new Error('Wait for the current operation to finish.')
-  const update = validatedUpdate(raw)
+  const update = validatedUpdate(raw, scheduleOf(automation))
   if (update.profileId) checkProfileAccounts(await getZernioOverview(), update.profileId, update.accounts)
   if (currentWorkspace() !== workspace || !cached.includes(automation) || busy.has(automation.id)) throw new Error('Automation changed while saving. Try again.')
   const previous = { ...automation, content: automation.content.map((item) => ({ ...item })) }
@@ -572,9 +579,11 @@ export async function approveAutomationTikTokReview(id: unknown, contentId: unkn
   } finally { busy.delete(automation.id) }
 }
 
-export async function runAutomation(id: unknown, slot?: { time: string; date: string }): Promise<Automation[]> {
+export async function runAutomation(id: unknown, slot?: { time: string; date: string } | 'interval'): Promise<Automation[]> {
   const { workspace, automation } = find(id)
   if (busy.has(automation.id)) return listAutomations()
+  if (slot === 'interval' && !intervalDue(automation, Date.now(), intervalAttempts.get(automation.id))) return listAutomations()
+  if (slot === 'interval') { intervalAttempts.set(automation.id, Date.now()); slot = undefined }
   if (slot && (!automation.enabled || automation.lastSlots[slot.time] === slot.date)) return listAutomations()
   const item = nextAutomationContent(automation)
   if (!item) {
@@ -678,6 +687,10 @@ export function startAutomationScheduler(): () => void {
         if (!automation.enabled) continue
         // Distinct automations can post together; one slow upload must not delay another account's slot.
         void (async () => {
+          if (scheduleOf(automation).mode === 'interval') {
+            if (intervalDue(automation, now, intervalAttempts.get(automation.id))) await runAutomation(automation.id, 'interval')
+            return
+          }
           for (const slot of dueSlots(automation.times, automation.timezone, now)) await runAutomation(automation.id, slot)
         })().catch((error) => logger.warn('automation.scheduler.failed', { message: error instanceof Error ? error.message : 'Unknown error' }))
       }
