@@ -114,9 +114,12 @@ function runProbe(urls: string[]): Promise<Map<string, { live: boolean; title: s
 }
 
 let checking = false
+/** A check asked for while one runs (e.g. a channel was just added) runs right after it. */
+let checkAgain = false
 export async function checkLiveChannels(): Promise<void> {
-  if (checking) return
+  if (checking) { checkAgain = true; return }
   checking = true
+  checkAgain = false
   try {
     const now = Date.now()
     const due = listLiveChannels().filter((channel) => channel.enabled && !sessions.has(channel.id) &&
@@ -139,6 +142,7 @@ export async function checkLiveChannels(): Promise<void> {
     logger.warn('live.check.failed')
   } finally {
     checking = false
+    if (checkAgain) void checkLiveChannels()
   }
 }
 

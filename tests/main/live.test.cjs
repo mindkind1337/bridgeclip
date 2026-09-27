@@ -295,3 +295,33 @@ test('the monitor probes enabled channels and starts a session for the live ones
     main.stopAllLiveForQuit()
   } finally { cleanup() }
 })
+
+test('a check requested during another check runs right after it', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-recheck-')
+  try {
+    const { child_process, spawned } = fakeChildProcess()
+    const main = loadMain(`
+      export * from './src/main/live/live-monitor'
+      export * from './src/main/live/live-channels'
+      export * as settings from './src/main/settings-store'
+      export { DEFAULT_LIVE_CHANNEL } from './src/shared/live'
+    `, { electron: fakeElectron(dir).electron, child_process })
+    fs.mkdirSync(path.join(dir, 'library'))
+    main.settings.savePublicSettings({ outputDirectory: path.join(dir, 'library'), pythonPath: 'python3', customVocabulary: '' })
+    main.settings.replaceApiKey('openrouterApiKey', 'or-key')
+    main.addLiveChannel({ ...main.DEFAULT_LIVE_CHANNEL, url: 'https://twitch.tv/first' })
+    const first = main.checkLiveChannels()
+    await until(() => spawned.length === 1, 'first probe')
+    main.addLiveChannel({ ...main.DEFAULT_LIVE_CHANNEL, url: 'https://twitch.tv/second' })
+    await main.checkLiveChannels() // returns at once: a check is running
+    assert.equal(spawned.length, 1)
+    spawned[0].child.stdout.end()
+    spawned[0].child.emit('close', 0, null)
+    await first
+    await until(() => spawned.length === 2 && spawned[1].child.input.includes('\n'), 'follow-up probe')
+    assert.deepEqual(JSON.parse(spawned[1].child.input).channels, ['https://www.twitch.tv/first', 'https://www.twitch.tv/second'])
+    spawned[1].child.stdout.end()
+    spawned[1].child.emit('close', 0, null)
+    main.stopAllLiveForQuit()
+  } finally { cleanup() }
+})

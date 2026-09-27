@@ -109,8 +109,9 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('zernio:posts:openTikTokLegal', (_event, key: unknown) => openTikTokLegal(key))
 
   handle('live:overview', () => getLiveOverview())
-  handle('live:channels:add', (_event, input: unknown) => { addLiveChannel(input); return getLiveOverview() })
-  handle('live:channels:update', (_event, id: unknown, input: unknown) => { updateLiveChannel(id, input); return getLiveOverview() })
+  // A newly followed channel may already be live: check at once instead of at the next minute.
+  handle('live:channels:add', (_event, input: unknown) => { addLiveChannel(input); void checkLiveChannels(); return getLiveOverview() })
+  handle('live:channels:update', (_event, id: unknown, input: unknown) => { updateLiveChannel(id, input); void checkLiveChannels(); return getLiveOverview() })
   handle('live:channels:remove', (_event, id: unknown) => {
     if (typeof id === 'string') forgetLiveChannel(id)
     removeLiveChannel(id)
