@@ -7,6 +7,7 @@ import type { ClipArtifact } from '../store/use-job-store'
 import { Checkbox } from './ui/Checkbox'
 import { Badge } from './ui/Badge'
 import { Skeleton } from './ui/Skeleton'
+import { ClipPlayerDialog } from './ClipPlayerDialog'
 
 // How the engine framed a vertical clip (its dominant layout).
 const LAYOUT_LABELS: Record<string, string> = {
@@ -49,6 +50,7 @@ export function ClipCard({
   const [hovering, setHovering] = useState(false)
   const [previewFailed, setPreviewFailed] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [playing, setPlaying] = useState(false)
   const title = clip.summary || `Clip ${clip.clip_index + 1}`
   const score = (clip.virality_score * 10).toFixed(1)
   const clipVertical = aspect == null ? vertical : aspect < 1
@@ -70,15 +72,6 @@ export function ClipCard({
       cancelled = true
     }
   }, [filePath, clip.duration_ms])
-
-  const openClip = async (): Promise<void> => {
-    setActionError(null)
-    try {
-      if (!await getApi().shell.openPath(filePath)) setActionError('Clip file is no longer available.')
-    } catch {
-      setActionError('Could not open this clip.')
-    }
-  }
 
   const showInFolder = async (): Promise<void> => {
     setActionError(null)
@@ -144,7 +137,7 @@ export function ClipCard({
         {/* The media plays the clip, or picks it while clips are being selected (the checkbox is the labelled control then). */}
         <button
           type="button"
-          onClick={selecting ? onToggleSelect : () => { void openClip() }}
+          onClick={selecting ? onToggleSelect : () => setPlaying(true)}
           aria-label={`Play “${title}”`}
           aria-hidden={selecting || undefined}
           tabIndex={selecting ? -1 : undefined}
@@ -214,6 +207,7 @@ export function ClipCard({
         )}
         {actionError && <p role="alert" className="mt-1.5 text-xs text-danger">{actionError}</p>}
       </div>
+      {playing && <ClipPlayerDialog filePath={filePath} title={title} vertical={clipVertical} onClose={() => setPlaying(false)} />}
     </article>
   )
 }
