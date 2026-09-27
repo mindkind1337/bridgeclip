@@ -12,6 +12,9 @@ import {
 } from './pipeline-runner'
 import { createRunRecord, finishRunRecord } from './run-history'
 import { cancelTrackedJob, dismissJob, enqueueJob, initJobManager, listJobs, liveJobIds } from './job-manager'
+import { addLiveChannel, removeLiveChannel, updateLiveChannel } from './live/live-channels'
+import { checkLiveChannels, forgetLiveChannel, getLiveOverview, startLiveSession, stopLiveSession } from './live/live-monitor'
+import { activeLiveJobIds } from './live/live-session'
 import { logger, getLogFilePath } from './logger'
 import { assertAbsolutePath, assertMediaPath, assertTrustedSender, authorizeMedia, isTrustedExternalUrl, isWebUrl, isWithinDirectory, openAuthorizedMedia } from './security'
 import { assertPublicWebUrl } from './network-policy'
@@ -104,6 +107,18 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
   handle('zernio:posts:dismiss', (_event, postId: unknown) => dismissPost(postId))
   handle('zernio:posts:open', (_event, postId: unknown, targetIndex: unknown) => openPostLink(postId, targetIndex))
   handle('zernio:posts:openTikTokLegal', (_event, key: unknown) => openTikTokLegal(key))
+
+  handle('live:overview', () => getLiveOverview())
+  handle('live:channels:add', (_event, input: unknown) => { addLiveChannel(input); return getLiveOverview() })
+  handle('live:channels:update', (_event, id: unknown, input: unknown) => { updateLiveChannel(id, input); return getLiveOverview() })
+  handle('live:channels:remove', (_event, id: unknown) => {
+    if (typeof id === 'string') forgetLiveChannel(id)
+    removeLiveChannel(id)
+    return getLiveOverview()
+  })
+  handle('live:session:start', (_event, id: unknown) => startLiveSession(id))
+  handle('live:session:stop', (_event, id: unknown) => stopLiveSession(id))
+  handle('live:check', async () => { await checkLiveChannels(); return getLiveOverview() })
 
   handle('automations:list', () => listAutomations())
   handle('automations:create', (_event, name: unknown) => createAutomation(name))
@@ -235,7 +250,7 @@ export function registerIpcHandlers(getMainWindow: () => BrowserWindow | null): 
 
   handle('history:list', () => {
     const settings = loadSettings()
-    return getJobHistory(settings.outputDirectory, liveJobIds())
+    return getJobHistory(settings.outputDirectory, new Set([...liveJobIds(), ...activeLiveJobIds()]))
   })
 
   handle('history:getJob', (_event, outputDir: string) => {

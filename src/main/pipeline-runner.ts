@@ -4,9 +4,9 @@ import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readd
 import { delimiter, dirname, join, resolve } from 'path'
 import { promisify } from 'util'
 const execFileAsync = promisify(execFile)
-import { createInterface } from 'readline'
-import { Transform } from 'stream'
-import { loadSettings, getSettingsForBridge, vocabularyTerms } from './settings-store'
+import { createInterface, type Interface } from 'readline'
+import { Transform, type Readable } from 'stream'
+import { loadSettings, getSettingsForBridge, vocabularyTerms, type AppSettings } from './settings-store'
 import { logger } from './logger'
 import { parseJobOutput, type JobOutput } from '../shared/job-output'
 import { BRIDGE_CONTRACT_VERSION } from '../shared/job-contract'
@@ -87,7 +87,7 @@ const activeJobDirectories = new Map<string, string>()
 const cancelledJobs = new Set<string>()
 const pendingProcessGroups = new Set<number>()
 
-function workRoot(): string {
+export function workRoot(): string {
   const root = join(app.getPath('userData'), 'work')
   mkdirSync(root, { recursive: true, mode: 0o700 })
   const stat = lstatSync(root)
@@ -112,7 +112,7 @@ const MAX_DEV_ENGINE_LOG_BYTES = 5 * 1024 * 1024
  * failed run can be diagnosed. Packaged builds never write it: raw engine
  * output can contain provider URLs, credentials and local paths.
  */
-function openDevEngineLog(jobId: string): { write: (data: Buffer) => void; close: () => void } {
+export function openDevEngineLog(jobId: string): { write: (data: Buffer) => void; close: () => void } {
   const disabled = { write: () => {}, close: () => {} }
   if (app.isPackaged || !/^[A-Za-z0-9_-]{1,128}$/.test(jobId)) return disabled
   let fd: number
@@ -166,11 +166,61 @@ export function getEnginePath(): string {
  * resolves to a path that does not exist, and `spawn()` fails with libuv
  * UV_ENOENT (surfaced as `code: -2` on the close event) with empty stderr.
  */
-export function getBridgeRunnerPath(): string {
+export function getBridgeRunnerPath(script = 'bridge_runner.py'): string {
   if (app.isPackaged) {
-    return resolve(join(process.resourcesPath, 'bridge', 'bridge_runner.py'))
+    return resolve(join(process.resourcesPath, 'bridge', script))
   }
-  return resolve(join(__dirname, '..', '..', 'bridge', 'bridge_runner.py'))
+  return resolve(join(__dirname, '..', '..', 'bridge', script))
+}
+
+/** Environment for a bridge process: runtime paths, provider keys and engine locations only. */
+export function bridgeSpawnEnvironment(settings: AppSettings, enginePath: string, jobWorkRoot: string): Record<string, string | undefined> {
+  const spawnEnv: Record<string, string | undefined> = {
+    ...runtimeEnvironment(),
+    ...getSettingsForBridge(settings),
+    PYTHONPATH: enginePath,
+    BRIDGECLIP_WORK_ROOT: jobWorkRoot,
+    PYTHONUNBUFFERED: '1',
+    PYTHONDONTWRITEBYTECODE: '1'
+  }
+  const ffmpeg = resolveBinary('ffmpeg')
+  if (ffmpeg !== 'ffmpeg') {
+    const binDir = dirname(ffmpeg)
+    const existingPath = spawnEnv.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'
+    spawnEnv.PATH = `${binDir}${delimiter}${existingPath}`
+  }
+  return spawnEnv
+}
+
+const MAX_BRIDGE_LINE_BYTES = 1024 * 1024
+
+/**
+ * Read bridge stdout as lines, calling `onLimit` (and dropping the rest) once a
+ * line or the whole stream grows past its bound.
+ */
+export function boundedBridgeLines(stdout: Readable, maxTotalBytes: number, onLimit: () => void): Interface {
+  let bridgeBytes = 0
+  let lineBytes = 0
+  const boundedStdout = new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bridgeBytes += chunk.length
+      let segmentStart = 0
+      for (let lineEnd = chunk.indexOf(10, segmentStart); lineEnd !== -1; lineEnd = chunk.indexOf(10, segmentStart)) {
+        lineBytes += lineEnd - segmentStart
+        if (lineBytes > MAX_BRIDGE_LINE_BYTES) break
+        lineBytes = 0
+        segmentStart = lineEnd + 1
+      }
+      lineBytes += chunk.length - segmentStart
+      if (bridgeBytes > maxTotalBytes || lineBytes > MAX_BRIDGE_LINE_BYTES) {
+        onLimit()
+        callback()
+        return
+      }
+      callback(null, chunk)
+    }
+  })
+  return createInterface({ input: stdout.pipe(boundedStdout), crlfDelay: Infinity })
 }
 
 /**
@@ -424,21 +474,7 @@ export function startClipJob(
     return
   }
 
-  const spawnEnv: Record<string, string | undefined> = {
-    ...runtimeEnvironment(),
-    ...envVars,
-    PYTHONPATH: enginePath,
-    BRIDGECLIP_WORK_ROOT: jobWorkRoot,
-    PYTHONUNBUFFERED: '1',
-    PYTHONDONTWRITEBYTECODE: '1'
-  }
-
-  const ffmpeg = resolveBinary('ffmpeg')
-  if (ffmpeg !== 'ffmpeg') {
-    const binDir = dirname(ffmpeg)
-    const existingPath = spawnEnv.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'
-    spawnEnv.PATH = `${binDir}${delimiter}${existingPath}`
-  }
+  const spawnEnv = bridgeSpawnEnvironment(settings, enginePath, jobWorkRoot)
 
   let child: ChildProcess
   try {
@@ -475,10 +511,7 @@ export function startClipJob(
   let pendingOutput: JobOutput | null = null
   const startedAt = Date.now()
 
-  const MAX_BRIDGE_LINE_BYTES = 1024 * 1024
   const MAX_BRIDGE_TOTAL_BYTES = 32 * 1024 * 1024
-  let bridgeBytes = 0
-  let lineBytes = 0
   let progressWindowStart = Date.now()
   let progressInWindow = 0
   const failBridgeLimit = (): void => {
@@ -488,26 +521,7 @@ export function startClipJob(
     reportError({ jobId, message: 'The clipping engine produced too much output and was stopped.' })
     terminateProcessTree(child, true)
   }
-  const boundedStdout = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      bridgeBytes += chunk.length
-      let segmentStart = 0
-      for (let lineEnd = chunk.indexOf(10, segmentStart); lineEnd !== -1; lineEnd = chunk.indexOf(10, segmentStart)) {
-        lineBytes += lineEnd - segmentStart
-        if (lineBytes > MAX_BRIDGE_LINE_BYTES) break
-        lineBytes = 0
-        segmentStart = lineEnd + 1
-      }
-      lineBytes += chunk.length - segmentStart
-      if (bridgeBytes > MAX_BRIDGE_TOTAL_BYTES || lineBytes > MAX_BRIDGE_LINE_BYTES) {
-        failBridgeLimit()
-        callback()
-        return
-      }
-      callback(null, chunk)
-    }
-  })
-  const lines = child.stdout ? createInterface({ input: child.stdout.pipe(boundedStdout), crlfDelay: Infinity }) : null
+  const lines = child.stdout ? boundedBridgeLines(child.stdout, MAX_BRIDGE_TOTAL_BYTES, failBridgeLimit) : null
   lines?.on('line', (line: string) => {
     if (!line.trim() || errored || completed || cancelledJobs.has(jobId)) return
     {
@@ -717,7 +731,7 @@ function isProcessGroupAlive(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 
-function runtimeEnvironment(): Record<string, string | undefined> {
+export function runtimeEnvironment(): Record<string, string | undefined> {
   const environment: Record<string, string | undefined> = {}
   for (const key of ['PATH', 'Path', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'TMPDIR', 'TEMP', 'TMP', 'SystemRoot', 'WINDIR', 'COMSPEC', 'LANG', 'LC_ALL', 'SSL_CERT_FILE', 'SSL_CERT_DIR']) {
     if (process.env[key]) environment[key] = process.env[key]
@@ -725,7 +739,7 @@ function runtimeEnvironment(): Record<string, string | undefined> {
   return environment
 }
 
-function terminateProcessTree(child: ChildProcess, force: boolean): void {
+export function terminateProcessTree(child: ChildProcess, force: boolean): void {
   if (!child.pid) return
   if (process.platform === 'win32') {
     execFile('taskkill', ['/PID', String(child.pid), '/T', ...(force ? ['/F'] : [])], { timeout: 5000, windowsHide: true }, () => {})

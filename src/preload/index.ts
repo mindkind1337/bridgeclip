@@ -14,6 +14,7 @@ import type { ClipJobRequest, JobSnapshot } from '../shared/jobs'
 import type { Automation, AutomationUpdate, AutomationTikTokReview, AutomationTikTokReviewUpdate } from '../shared/automations'
 import type { OpenRouterCatalog } from '../shared/openrouter-models'
 import type { UpdateState } from '../shared/updates'
+import type { LiveChannelInput, LiveOverview } from '../shared/live'
 
 export interface ClipSettings {
   openrouterConfigured: boolean
@@ -67,6 +68,16 @@ export interface BridgeClipAPI {
     prepareTikTokReview: (id: string, contentId: string) => Promise<AutomationTikTokReview>
     approveTikTokReview: (id: string, contentId: string, update: AutomationTikTokReviewUpdate) => Promise<Automation[]>
     removeContent: (id: string, contentId: string) => Promise<Automation[]>
+  }
+  live: {
+    overview: () => Promise<LiveOverview>
+    addChannel: (input: LiveChannelInput) => Promise<LiveOverview>
+    updateChannel: (id: string, input: LiveChannelInput) => Promise<LiveOverview>
+    removeChannel: (id: string) => Promise<LiveOverview>
+    start: (id: string) => Promise<LiveOverview>
+    stop: (id: string) => Promise<LiveOverview>
+    checkNow: () => Promise<LiveOverview>
+    onUpdate: (callback: (overview: LiveOverview) => void) => () => void
   }
   settings: {
     load: () => Promise<ClipSettings>
@@ -186,6 +197,16 @@ const api: BridgeClipAPI = {
     prepareTikTokReview: (id, contentId) => ipcRenderer.invoke('automations:prepareTikTokReview', id, contentId),
     approveTikTokReview: (id, contentId, update) => ipcRenderer.invoke('automations:approveTikTokReview', id, contentId, update),
     removeContent: (id, contentId) => ipcRenderer.invoke('automations:removeContent', id, contentId)
+  },
+  live: {
+    overview: () => ipcRenderer.invoke('live:overview'),
+    addChannel: (input) => ipcRenderer.invoke('live:channels:add', input),
+    updateChannel: (id, input) => ipcRenderer.invoke('live:channels:update', id, input),
+    removeChannel: (id) => ipcRenderer.invoke('live:channels:remove', id),
+    start: (id) => ipcRenderer.invoke('live:session:start', id),
+    stop: (id) => ipcRenderer.invoke('live:session:stop', id),
+    checkNow: () => ipcRenderer.invoke('live:check'),
+    onUpdate: (callback) => subscribe('live:update', callback)
   },
   settings: {
     load: () => ipcRenderer.invoke('settings:load'),
