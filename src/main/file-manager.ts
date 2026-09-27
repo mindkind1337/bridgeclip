@@ -8,7 +8,7 @@ import { open, readdir } from 'fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'path'
 import { resolveBinary } from './tools'
 import { parseJobOutput, type JobOutput, type RunTranscript } from '../shared/job-output'
-import { LIVE_OVERLAP_SECONDS, broadcastTime, isLiveTimeline, isReplayUrl, secondsIntoStream, type ChannelLiveSummary, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveRunInfo, type LiveTranscript } from '../shared/live'
+import { LIVE_OVERLAP_SECONDS, broadcastTime, chatActivity, clipChatReaction, isLiveTimeline, isReplayUrl, secondsIntoStream, type ChannelLiveSummary, type LiveChannel, type LiveChannelClip, type LivePartInfo, type LiveRunInfo, type LiveTranscript } from '../shared/live'
 import { readRunRecord } from './run-history'
 
 export interface JobHistoryEntry {
@@ -459,6 +459,7 @@ export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 
   const members = (chosenKey && groups.get(chosenKey)) || []
   const clips: LiveChannelClip[] = []
   for (const item of members) {
+    const chat = chatActivity(await readRunChat(item.runDir, libraryDir))
     for (const clip of item.output.clips) {
       const path = clip.s3_url.startsWith('file://') ? clip.s3_url.slice('file://'.length) : clip.s3_url
       const inside = relative(item.runDir, path)
@@ -469,7 +470,8 @@ export async function getChannelClips(channel: Pick<LiveChannel, 'id' | 'url' | 
         score: clip.virality_score, part: item.part, startSeconds, durationMs: clip.duration_ms,
         intoStream: item.info ? secondsIntoStream(item.info, startSeconds) : null,
         hasReplay: Boolean(item.info?.replayUrl && item.info.timeline?.length && item.info.streamStartedAt),
-        recordedAt: new Date(item.modified).toISOString()
+        recordedAt: new Date(item.modified).toISOString(),
+        chatReaction: chatReactionOf(clipChatReaction(chat, startSeconds, clip.end_time_ms / 1000))
       })
     }
   }
@@ -495,4 +497,20 @@ async function liveRunInfo(runDir: string, libraryDir: string, title: string): P
   }
   if (!match || !fromTitle || Number.isNaN(fromTitle.getTime())) return null
   return { channel: match[1], platform: null, part: Number(match[3]), streamStartedAt: null, recordedAt: fromTitle.toISOString() }
+}
+
+/** A part's saved chat messages (chat.json), or none. */
+async function readRunChat(runDir: string, libraryDir: string): Promise<{ t: number; text: string }[]> {
+  try {
+    const saved = (await readLibraryJson(join(runDir, 'chat.json'), libraryDir, 30 * 1024 * 1024))?.value as { messages?: unknown } | undefined
+    if (!saved || !Array.isArray(saved.messages)) return []
+    return saved.messages.flatMap((item) => {
+      const { t, text } = (item ?? {}) as Record<string, unknown>
+      return typeof t === 'number' && Number.isFinite(t) && typeof text === 'string' ? [{ t, text }] : []
+    })
+  } catch { return [] }
+}
+
+function chatReactionOf(found: { count: number; ratio: number; reaction: string | null } | null): LiveChannelClip['chatReaction'] {
+  return found ? { count: found.count, ratio: found.ratio, reaction: found.reaction } : null
 }

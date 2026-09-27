@@ -200,6 +200,8 @@ export interface LiveChannelClip {
   hasReplay: boolean
   /** When its part was recorded (from the run), for ordering. */
   recordedAt: string
+  /** The chat spike this clip's moment caused, if its part kept the chat. */
+  chatReaction?: { count: number; ratio: number; reaction: string | null } | null
 }
 
 /** Every part of one live session, merged in order without the overlaps. */

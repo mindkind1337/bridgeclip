@@ -371,6 +371,12 @@ function ChannelClips({ channel, live, ended, refreshKey }: {
               <Play className="ml-px h-3 w-3" fill="currentColor" />
             </button>
             <span className="min-w-0 flex-1 truncate text-ink" title={clip.title}>{clip.title}</span>
+            {clip.chatReaction && (
+              <span className="shrink-0 text-warning"
+                title={`Made from a chat spike: ${clip.chatReaction.count} messages in 10 s, ${clip.chatReaction.ratio.toFixed(1)} times the usual rate`}>
+                🔥 ×{clip.chatReaction.ratio.toFixed(1)}{clip.chatReaction.reaction ? ` ${clip.chatReaction.reaction}` : ''}
+              </span>
+            )}
             <span className="shrink-0 font-mono tabular text-ink-subtle" title="Score">{Math.round(clip.score * 100)}</span>
             <span className="w-24 shrink-0 text-right text-ink-subtle">
               {clip.intoStream !== null ? `${streamClock(clip.intoStream)} in live` : `part ${clip.part}`}
