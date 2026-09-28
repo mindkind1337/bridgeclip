@@ -51,6 +51,17 @@ def test_reaction_words_cover_laughs_in_several_languages():
     assert chat.reaction_kind('hello') is None
 
 
+def test_french_chat_reactions_count():
+    for word in ('ahahah', 'AHAHAHAH', 'mdrrr', 'PTDRRR', 'jpp'):
+        assert chat.reaction_kind(word) == 'laugh', word
+    for word in ('incroyable', 'énorme', 'masterclass'):
+        assert chat.reaction_kind(word) == 'hype', word
+    for word in ('quoi', 'wsh', 'hein'):
+        assert chat.reaction_kind(word) == 'shock', word
+    for word in ('bonjour', 'salut', 'ah', 'aha'):
+        assert chat.reaction_kind(word) is None, word
+
+
 class FakeSocket:
     def __init__(self, frames):
         self.frames = list(frames)

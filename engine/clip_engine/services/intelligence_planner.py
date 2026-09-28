@@ -110,7 +110,7 @@ CLIP_PLAN_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "start_time": {"type": "number", "description": "Clip start, seconds from the start of the video."},
                     "end_time": {"type": "number", "description": "Clip end, seconds from the start of the video."},
-                    "summary": {"type": "string", "description": "2-7 word on-screen title."},
+                    "summary": {"type": "string", "description": "2-7 word on-screen title, in the language spoken in the video."},
                     "scores": {
                         "type": "object",
                         "properties": {
@@ -149,7 +149,7 @@ _CHAPTER_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "time": {"type": "number", "description": "Chapter start, seconds from the start of the video."},
-        "title": {"type": "string", "description": "2-6 word chapter title."},
+        "title": {"type": "string", "description": "2-6 word chapter title, in the language spoken in the video."},
     },
     "required": ["time", "title"],
     "additionalProperties": False,

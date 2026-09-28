@@ -29,10 +29,10 @@ WINDOW_SECONDS = 10
 MAX_NOTE_WINDOWS = 25
 
 LAUGH = {"lul", "lulw", "omegalul", "kekw", "kek", "kekl", "icant", "lmao", "lmfao", "lol", "xd", "xdd", "pepelaugh",
-         "😂", "🤣", "💀", "mdr", "ptdr", "jaja", "jajaja", "kappa", "lolw", "omegaroll", "aware"}
+         "😂", "🤣", "💀", "mdr", "ptdr", "jaja", "jajaja", "kappa", "lolw", "omegaroll", "aware", "jpp"}
 HYPE = {"pog", "pogchamp", "poggers", "pogu", "w", "ww", "www", "letsgo", "lets", "gg", "ez", "clap", "hype", "wow",
-        "🔥", "🐐", "goat", "insane", "huge"}
-SHOCK = {"monkas", "wtf", "omg", "holy", "wait", "what", "😱", "😳", "noway", "nah", "monkaw", "sus", "hmm", "?"}
+        "🔥", "🐐", "goat", "insane", "huge", "incroyable", "masterclass", "chaud", "enorme", "énorme", "bravo"}
+SHOCK = {"monkas", "wtf", "omg", "holy", "wait", "what", "😱", "😳", "noway", "nah", "monkaw", "sus", "hmm", "?", "quoi", "hein", "wsh", "wesh", "oskour"}
 # Chat bots and commands are not viewer reactions.
 BOTS = {"nightbot", "streamelements", "streamlabs", "moobot", "fossabot", "wizebot", "soundalerts", "sery_bot",
         "pokemoncommunitygame", "botrixoficial", "kickbot", "streamlootsbot", "commanderroot", "deepbot", "coebot",
@@ -44,7 +44,8 @@ def is_noise(user: Optional[str], text: str) -> bool:
     return text.lstrip().startswith("!") or (user or "").lower() in BOTS
 
 
-LAUGH_PATTERN = re.compile(r"^(?:ha){2,}h?$|^(?:he){2,}$|^(?:ja){2,}$|^l+o+l+$|^x+d+$")
+# "hahaha", "ahahah" (French), "jajaja", "lool", "xDD", "mdrrr", "ptdrrr".
+LAUGH_PATTERN = re.compile(r"^a?(?:ha){2,}h?$|^(?:he){2,}$|^(?:ja){2,}$|^l+o+l+$|^x+d+$|^m+d+r+$|^p+t+d+r+$")
 TOKEN = re.compile(r"[\w']+|[^\w\s]", re.UNICODE)
 
 
