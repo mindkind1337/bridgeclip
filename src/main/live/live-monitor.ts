@@ -125,16 +125,18 @@ export async function checkLiveChannels(): Promise<void> {
   checkAgain = false
   try {
     const now = Date.now()
-    const due = listLiveChannels().filter((channel) => channel.enabled && !sessions.has(channel.id) &&
-      now - (endedAt.get(channel.id) ?? 0) >= RESTART_COOLDOWN_MS)
-    if (!due.length || !loadSettings().openrouterApiKey) return
+    // Every channel is checked, so the page shows who is live even when auto-recording is off.
+    const due = listLiveChannels().filter((channel) => !sessions.has(channel.id))
+    if (!due.length) return
+    const canRecord = Boolean(loadSettings().openrouterApiKey)
     const results = await runProbe(due.map((channel) => channel.url))
     const at = new Date().toISOString()
     for (const channel of due) {
       const result = results.get(channel.url)
       if (!result) continue
       checks[channel.id] = { at, live: result.live, title: result.title }
-      if (!result.live || sessions.has(channel.id) || sessions.size >= MAX_LIVE_SESSIONS) continue
+      if (!result.live || !channel.enabled || !canRecord || sessions.has(channel.id) || sessions.size >= MAX_LIVE_SESSIONS) continue
+      if (now - (endedAt.get(channel.id) ?? 0) < RESTART_COOLDOWN_MS) continue
       try {
         // Settings may have changed while the probe ran.
         if (getLiveChannel(channel.id).enabled) startLiveSession(channel.id)

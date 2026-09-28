@@ -217,7 +217,12 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
             <h2 className="truncate text-sm font-semibold text-ink">{channel.displayName}</h2>
             {status && (running || state?.status === 'error')
               ? <Badge tone={status.tone === 'idle' ? 'neutral' : status.tone} icon={<StatusDot tone={status.tone} pulse={running} />}>{status.label}</Badge>
-              : !channel.enabled ? <Badge>Not followed</Badge> : null}
+              : check?.live ? <Badge tone="danger" icon={<StatusDot tone="danger" pulse />}>Live now</Badge> : null}
+            {!channel.enabled && (
+              <Badge tone={check?.live && !running ? 'warning' : 'neutral'}>
+                <span title="Record automatically when this channel goes live is off: turn on Auto-record, or press Record">Auto-record off</span>
+              </Badge>
+            )}
           </div>
           <p className="mt-0.5 flex flex-wrap gap-x-1.5 text-2xs text-ink-muted">
             {state && (running || state.partsDone > 0) ? (
@@ -228,9 +233,13 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
                 <span>· <span className="tabular text-ink">{state.clipsQueued}</span> queued</span>
               </>
             ) : check ? (
-              <span>{check.live ? 'Live' : 'Offline'} · checked {formatRelativeDate(check.at)}</span>
+              <span>
+                {check.live ? <>Live{check.title ? <> · <span className="text-ink">{check.title}</span></> : null}</> : 'Offline'}
+                {' '}· checked {formatRelativeDate(check.at)}
+                {check.live && !channel.enabled ? ' · not recording: press Record to record it' : ''}
+              </span>
             ) : (
-              <span>{channel.enabled ? 'Waiting for the first check' : 'Start a recording by hand, or follow the channel'}</span>
+              <span>Waiting for the first check</span>
             )}
             <span>· {automation ? <>queues to <span className="text-ink">{automation.name}</span></> : 'clips stay in the Library'}</span>
           </p>
@@ -288,6 +297,12 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
           {state?.message && <p className={cn('mt-1 text-2xs', state.status === 'error' ? 'text-warning' : 'text-ink-muted')}>{state.message}</p>}
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          <label className="mr-1.5 flex items-center gap-1.5 text-2xs text-ink-muted"
+            title="Record automatically when this channel goes live">
+            <Switch checked={channel.enabled} disabled={busy === `save:${channel.id}`} label="Record automatically when live"
+              onChange={(enabled) => void onSave({ ...inputFor(channel), enabled })} />
+            Auto-record
+          </label>
           <Button size="sm" variant="ghost" icon={<MonitorPlay className="h-3.5 w-3.5" />} onClick={onWatch}
             title="Watch and listen to this channel in a BridgeClip window">Watch</Button>
           {running ? (

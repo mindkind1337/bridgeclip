@@ -247,7 +247,7 @@ test('engine messages with paths or links are replaced by safe text', async () =
   } finally { cleanup() }
 })
 
-test('the monitor probes enabled channels and starts a session for the live ones', async () => {
+test('the monitor probes every channel and records the live ones that auto-record', async () => {
   const { dir, cleanup } = tempDir('bridgeclip-live-monitor-')
   try {
     const { child_process, spawned } = fakeChildProcess()
@@ -270,9 +270,10 @@ test('the monitor probes enabled channels and starts a session for the live ones
     const checking = main.checkLiveChannels()
     await until(() => spawned.length === 1 && spawned[0].child.input.includes('\n'), 'probe')
     const probe = spawned[0].child
-    assert.deepEqual(JSON.parse(probe.input).channels, ['https://www.twitch.tv/online', 'https://www.twitch.tv/offline'])
+    assert.deepEqual(JSON.parse(probe.input).channels, ['https://www.twitch.tv/online', 'https://www.twitch.tv/offline', 'https://www.twitch.tv/paused'])
     probe.send({ type: 'probe', url: 'https://www.twitch.tv/online', live: true, title: 'Big\u0007 game', channel: 'Online' })
     probe.send({ type: 'probe', url: 'https://www.twitch.tv/offline', live: false })
+    probe.send({ type: 'probe', url: 'https://www.twitch.tv/paused', live: true, title: 'Paused live' })
     probe.send({ type: 'probe', url: 'https://www.twitch.tv/unknown', live: true })
     probe.stdout.end()
     probe.emit('close', 0, null)
@@ -284,13 +285,15 @@ test('the monitor probes enabled channels and starts a session for the live ones
     const overview = main.getLiveOverview()
     const online = overview.channels.find((channel) => channel.url.endsWith('/online'))
     assert.equal(overview.checks[online.id].title, 'Big  game')
+    const paused = overview.channels.find((channel) => channel.url.endsWith('/paused'))
+    assert.equal(overview.checks[paused.id].live, true, 'a live is shown even when auto-record is off')
     assert.equal(overview.sessions.length, 1)
     assert.equal(overview.sessions[0].status, 'resolving')
     assert.ok(updates.length > 0)
 
     const next = main.checkLiveChannels()
     await until(() => spawned.length === 3 && spawned[2].child.input.includes('\n'), 'second probe')
-    assert.deepEqual(JSON.parse(spawned[2].child.input).channels, ['https://www.twitch.tv/offline'],
+    assert.deepEqual(JSON.parse(spawned[2].child.input).channels, ['https://www.twitch.tv/offline', 'https://www.twitch.tv/paused'],
       'the next check probes only channels without a session')
     spawned[2].child.stdout.end()
     spawned[2].child.emit('close', 0, null)
