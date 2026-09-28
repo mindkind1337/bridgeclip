@@ -636,3 +636,30 @@ test('the chat chart of a whole live starts at its first message and stays reada
   const reaction = clipChatReaction(activity, start + 1790, start + 1820)
   assert.ok(reaction && reaction.reaction === 'KEKW' && reaction.at >= start)
 })
+
+test('a connection too slow for the stream is said once, with the speeds', async () => {
+  const { dir, cleanup } = tempDir('bridgeclip-live-network-')
+  try {
+    const { session, spawned, states } = sessionHarness(dir)
+    session.start()
+    const { child } = spawned[0]
+    child.send({ type: 'status', status: 'recording' })
+    child.send({ type: 'progress', part: 1, recorded_s: 10, part_s: 600, gaps: 0, ads: 0, network: { mbps: 6.2, needed_mbps: 6, slow: false } })
+    child.send({ type: 'progress', part: 1, recorded_s: 20, part_s: 600, gaps: 3, ads: 0, network: { mbps: 3.1, needed_mbps: 6, slow: true } })
+    child.send({ type: 'progress', part: 1, recorded_s: 30, part_s: 600, gaps: 3, ads: 0, network: { mbps: 3.2, needed_mbps: 6, slow: true } })
+    child.send({ type: 'progress', part: 1, recorded_s: 40, part_s: 600, gaps: 3, ads: 0, network: { mbps: 'fast', needed_mbps: 6, slow: true } })
+    child.send({ type: 'progress', part: 1, recorded_s: 50, part_s: 600, gaps: 3, ads: 0, network: { mbps: 6.5, needed_mbps: 6, slow: false } })
+    await until(() => states.at(-1)?.recording?.seconds === 50, 'progress')
+    const lines = states.at(-1).activity.map((entry) => entry.text)
+    assert.deepEqual(lines.filter((line) => /slow|keeps up|lost/.test(line)), [
+      'Internet too slow for this stream: 3.1 Mb/s received, the stream needs about 6 Mb/s. Parts of the live are lost',
+      '3 stream segment(s) could not be downloaded and were lost (connection too slow)',
+      'Connection keeps up with the stream again'
+    ])
+    assert.deepEqual(states.at(-1).recording.network, { mbps: 6.5, neededMbps: 6, slow: false })
+    assert.ok(states.some((state) => state.recording?.seconds === 40 && state.recording.network === undefined), 'a malformed report is ignored')
+  } finally {
+    cleanup()
+  }
+})
+

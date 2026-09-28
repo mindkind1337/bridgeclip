@@ -260,6 +260,12 @@ function ChannelCard({ channel, state, check, automations, expanded, busy, canSt
                   </span>
                 )}
               </div>
+              {recording.network?.slow && (
+                <p role="status" className="mt-1 text-2xs text-warning"
+                  title="Segments arrive slower than the live goes on, so Twitch/YouTube/Kick drop them before they are downloaded">
+                  Internet too slow: {recording.network.mbps} Mb/s received, this stream needs about {recording.network.neededMbps} Mb/s · parts are lost
+                </p>
+              )}
               <div className="mt-1 h-1 overflow-hidden rounded-full bg-white/[0.08]" role="progressbar" aria-label={`Part ${recording.part} recorded`}
                 aria-valuemin={0} aria-valuemax={recording.targetSeconds} aria-valuenow={Math.round(recording.seconds)}>
                 <div className="h-full rounded-full bg-danger/80 transition-[width] duration-1000"

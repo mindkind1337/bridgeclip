@@ -172,8 +172,10 @@ async def record(spec: dict) -> bool:
         if now - last_progress[0] < PROGRESS_INTERVAL_SECONDS:
             return
         last_progress[0] = now
+        capture = capture_holder.get("capture")
+        network = capture.network() if capture is not None else None
         bridge.emit({"type": "progress", "part": part, "recorded_s": round(recorded, 1), "part_s": target,
-                     "gaps": gaps, "ads": ads})
+                     "gaps": gaps, "ads": ads, **({"network": network} if network else {})})
     outcome: dict = {}
     capture_holder: dict = {}
 

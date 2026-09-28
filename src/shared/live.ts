@@ -38,6 +38,8 @@ export type LiveChannelInput = Pick<LiveChannel, 'url' | 'enabled' | 'automation
 
 export type LiveSessionStatus = 'offline' | 'resolving' | 'recording' | 'stopping' | 'ended' | 'error'
 
+export interface LiveNetwork { mbps: number; neededMbps: number; slow: boolean }
+
 export type LiveActivityTone = 'info' | 'good' | 'warn'
 
 /** Saved as live.json in each clipped part's run folder: which live session and where in it. */
@@ -241,7 +243,11 @@ export interface LiveSessionState {
   clipsMade: number
   clipsQueued: number
   /** The part being recorded now: new content so far, its target length, and what was skipped. */
-  recording: { part: number; seconds: number; targetSeconds: number; gaps: number; ads: number } | null
+  recording: {
+    part: number; seconds: number; targetSeconds: number; gaps: number; ads: number
+    /** Download speed against the stream's bitrate (Mb/s); slow when the capture fell behind the live lately. */
+    network?: LiveNetwork
+  } | null
   /** The broadcast's replay page, once the platform has one. */
   replayUrl?: string | null
   /** The part being clipped now and the engine's current step. */

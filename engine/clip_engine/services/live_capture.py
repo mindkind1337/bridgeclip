@@ -14,6 +14,7 @@ import shutil
 import threading
 import time
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 from urllib.parse import urljoin, urlsplit
@@ -30,6 +31,11 @@ MIN_FINAL_CHUNK_SECONDS = 30.0
 MAX_LIVE_HEIGHT = 1080
 REQUEST_TIMEOUT_SECONDS = 20
 SEGMENT_ATTEMPTS = 3
+PARALLEL_DOWNLOADS = 4
+# Download speed is measured over this window; falling behind the live within
+# SLOW_NETWORK_SECONDS marks the connection as too slow for the stream.
+NETWORK_WINDOW_SECONDS = 60
+SLOW_NETWORK_SECONDS = 120
 REMUX_TIMEOUT_SECONDS = 10 * 60
 MAX_WAITING_SEGMENTS = 60
 # Network errors reading the playlist are retried with a growing pause; after this
@@ -431,6 +437,15 @@ class HlsCapture:
         self.lead_in: list[Recorded] = []
         # Init segment URI -> local copy, for fragmented MP4 streams.
         self.inits: dict[str, str] = {}
+        # Segments download a few at a time: one by one, a slow connection falls
+        # behind the live and the playlist drops segments before they are fetched.
+        self.downloads: Optional[ThreadPoolExecutor] = None
+        self.prefetched: dict[str, Future] = {}
+        self.network_lock = threading.Lock()
+        self.network_started: Optional[float] = None
+        self.received: deque = deque()  # (monotonic time, bytes) of finished downloads
+        self.bitrate: deque = deque(maxlen=30)  # (media seconds, bytes) of recorded segments
+        self.fell_behind_at: Optional[float] = None
 
     def run(self) -> str:
         """Return why recording stopped: "offline", "ended", "stopped" or "limit"."""
@@ -496,11 +511,14 @@ class HlsCapture:
                 fresh = [s for s in playlist.segments if seen < 0 or s.sequence > seen]
                 if fresh and seen >= 0 and fresh[0].sequence > seen + 1:
                     self.gaps += 1
+                    self.fell_behind_at = time.monotonic()
                     logger.warning("Live playlist skipped %d segment(s)", fresh[0].sequence - seen - 1)
                 waiting.update((s.sequence, s) for s in fresh)
                 while len(waiting) > MAX_WAITING_SEGMENTS:
                     last_sequence = waiting.pop(min(waiting)).sequence
                     self.gaps += 1
+                    self.fell_behind_at = time.monotonic()
+                self._prefetch(waiting.values(), audio)
                 for sequence in sorted(waiting):
                     if self.stop_event.is_set():
                         break
@@ -530,16 +548,67 @@ class HlsCapture:
                     return "ended"
                 self.stop_event.wait(max(1.0, min(playlist.target_duration / 2, 6.0)))
         finally:
+            if self.downloads:
+                self.downloads.shutdown(wait=False, cancel_futures=True)
+            self.prefetched.clear()
             shutil.rmtree(self.segments_dir, ignore_errors=True)
 
     def _playlist(self, url: str) -> MediaPlaylist:
         body, final_url = self.fetch(url, MAX_PLAYLIST_BYTES)
         return parse_media_playlist(body.decode("utf-8", errors="replace"), final_url)
 
+    def network(self) -> Optional[dict]:
+        """Download speed against the stream's bitrate, in Mb/s, and whether the capture fell behind lately.
+
+        While the capture keeps up, the speed only follows the live; once it falls
+        behind, downloads run flat out and the speed is what the connection gives.
+        """
+        now = time.monotonic()
+        with self.network_lock:
+            while self.received and now - self.received[0][0] > NETWORK_WINDOW_SECONDS:
+                self.received.popleft()
+            if self.network_started is None or not self.received or not self.bitrate:
+                return None
+            span = min(NETWORK_WINDOW_SECONDS, now - self.network_started)
+            got = sum(size for _, size in self.received)
+        seconds = sum(duration for duration, _ in self.bitrate)
+        if span < 5 or seconds <= 0:
+            return None
+        return {"mbps": round(got * 8 / span / 1e6, 1),
+                "needed_mbps": round(sum(size for _, size in self.bitrate) * 8 / seconds / 1e6, 1),
+                "slow": self.fell_behind_at is not None and now - self.fell_behind_at < SLOW_NETWORK_SECONDS}
+
+    def _prefetch(self, segments: Iterable[Segment], audio: Optional[dict]) -> None:
+        """Start downloading the segments that wait, in playlist order."""
+        if self.downloads is None:
+            self.downloads = ThreadPoolExecutor(max_workers=PARALLEL_DOWNLOADS, thread_name_prefix="live-segment")
+        wanted = []
+        for segment in sorted(segments, key=lambda item: item.sequence):
+            if is_ad_segment(segment, self.stream.platform):
+                continue
+            wanted.append(segment.uri)
+            if audio and segment.sequence in audio:
+                wanted.append(audio[segment.sequence].uri)
+        for uri in list(self.prefetched):
+            if uri not in wanted:
+                self.prefetched.pop(uri).cancel()
+        for uri in wanted:
+            if uri not in self.prefetched:
+                self.prefetched[uri] = self.downloads.submit(self._download_now, uri)
+
     def _download(self, uri: str) -> Optional[bytes]:
+        future = self.prefetched.pop(uri, None)
+        return future.result() if future is not None else self._download_now(uri)
+
+    def _download_now(self, uri: str) -> Optional[bytes]:
         for attempt in range(SEGMENT_ATTEMPTS):
             try:
+                with self.network_lock:
+                    if self.network_started is None:
+                        self.network_started = time.monotonic()
                 data, _ = self.fetch(uri, MAX_SEGMENT_BYTES)
+                with self.network_lock:
+                    self.received.append((time.monotonic(), len(data)))
                 return data
             except PlaylistExpired:
                 return None
@@ -600,6 +669,8 @@ class HlsCapture:
             audio_path = os.path.join(self.segments_dir, f"{segment.sequence}.{'a.m4s' if audio_init else 'aac'}")
             with open(audio_path, "wb") as handle:
                 handle.write(audio)
+        if segment.duration > 0:
+            self.bitrate.append((segment.duration, len(video) + len(audio or b"")))
         self.current.append(Recorded(path, audio_path, segment.duration, self.content_seconds, init, audio_init,
                                      segment.program_time))
         self.content_seconds += segment.duration

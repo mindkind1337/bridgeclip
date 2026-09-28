@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto'
 import { mkdirSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { BRIDGE_CONTRACT_VERSION } from '../../shared/job-contract'
-import { MAX_LIVE_ACTIVITY, liveOverlapSeconds, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LivePartInfo, type LiveSessionState, isLiveTimeline, isReplayUrl } from '../../shared/live'
+import { MAX_LIVE_ACTIVITY, liveOverlapSeconds, selectLiveClips, type KeptLiveClip, type LiveActivityTone, type LiveChannel, type LiveClipDecision, type LiveNetwork, type LivePartInfo, type LiveSessionState, isLiveTimeline, isReplayUrl } from '../../shared/live'
 import { addLibraryClipsToAutomation } from '../automations'
 import { getJobOutput } from '../file-manager'
 import { logger } from '../logger'
@@ -233,10 +233,20 @@ export class LiveSession {
             this.inAdBreak = false
             this.log('Ad break over: recording the stream again')
           }
-          if (gapsNow > (previous?.gaps ?? 0)) {
-            this.log(`${gapsNow - (previous?.gaps ?? 0)} stream segment(s) could not be downloaded and were lost`, 'warn')
+          const network = liveNetwork(message.network)
+          if (network?.slow && !this.slowNetwork) {
+            this.slowNetwork = true
+            this.log(`Internet too slow for this stream: ${network.mbps} Mb/s received, the stream needs about ${network.neededMbps} Mb/s. Parts of the live are lost`, 'warn')
+          } else if (network && !network.slow && this.slowNetwork) {
+            this.slowNetwork = false
+            this.log('Connection keeps up with the stream again')
           }
-          this.update({ recording: { part: part as number, seconds, targetSeconds: target, gaps: gapsNow, ads: adsNow } })
+          if (gapsNow > (previous?.gaps ?? 0)) {
+            const lost = gapsNow - (previous?.gaps ?? 0)
+            this.log(`${lost} stream segment(s) could not be downloaded and were lost${network?.slow ? ' (connection too slow)' : ''}`, 'warn')
+          }
+          this.update({ recording: { part: part as number, seconds, targetSeconds: target, gaps: gapsNow, ads: adsNow,
+            ...(network ? { network } : {}) } })
         }
         break
       }
@@ -420,6 +430,7 @@ export class LiveSession {
   }
 
   private inAdBreak = false
+  private slowNetwork = false
   private chatConnected = false
 
   /** Add a line to the session's activity log (published with the next update). */
@@ -451,4 +462,12 @@ export class LiveSession {
 export function resetLiveSessionMemory(): void {
   keptByChannel.clear()
   activeChunkJobs.clear()
+}
+
+/** The runner's download speed report, when well formed. */
+function liveNetwork(value: unknown): LiveNetwork | null {
+  if (!value || typeof value !== 'object') return null
+  const { mbps, needed_mbps: neededMbps, slow } = value as Record<string, unknown>
+  const rate = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n < 100_000
+  return rate(mbps) && rate(neededMbps) && typeof slow === 'boolean' ? { mbps, neededMbps, slow } : null
 }

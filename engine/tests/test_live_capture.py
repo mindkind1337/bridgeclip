@@ -428,3 +428,45 @@ def test_a_stream_that_stays_unreachable_ends_with_an_error(tmp_path):
 def test_only_the_last_chunk_is_final(tmp_path):
     _, _, chunks, _ = run_capture(tmp_path, FakeStream(110), chunk_seconds=60, overlap_seconds=10)
     assert [c.final for c, _ in chunks] == [False, False, False, True]
+
+
+def test_segments_download_in_parallel_and_stay_in_order(tmp_path):
+    import threading
+    import time as clock
+
+    class SlowStream(FakeStream):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.lock, self.active, self.peak = threading.Lock(), 0, 0
+
+        def fetch(self, url, max_bytes):
+            if url.endswith('.m3u8'):
+                return super().fetch(url, max_bytes)
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            clock.sleep(0.02)
+            with self.lock:
+                self.active -= 1
+            return super().fetch(url, max_bytes)
+
+    stream = SlowStream(40, per_poll=6)
+    capture, reason, chunks, _ = run_capture(tmp_path, stream, chunk_seconds=60, overlap_seconds=0)
+    assert reason == 'ended' and capture.gaps == 0
+    assert stream.peak > 1
+    assert chunks[0][1].startswith('seg0.tsseg1.tsseg2.ts')
+
+
+def test_falling_behind_the_live_reports_a_slow_connection(tmp_path):
+    # Each poll moves the 6-segment window by 9: segments slide out before they are fetched.
+    capture, _, _, _ = run_capture(tmp_path, FakeStream(60, per_poll=9), chunk_seconds=60, overlap_seconds=0)
+    assert capture.gaps > 0
+    capture.network_started -= 30  # measured over a real span, not the instant the test took
+    network = capture.network()
+    assert network['slow'] is True and network['mbps'] >= 0 and network['needed_mbps'] >= 0
+
+
+def test_a_capture_that_keeps_up_is_not_slow(tmp_path):
+    capture, _, _, _ = run_capture(tmp_path, FakeStream(40), chunk_seconds=60, overlap_seconds=0)
+    capture.network_started -= 30
+    assert capture.network()['slow'] is False
